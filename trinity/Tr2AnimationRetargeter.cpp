@@ -1274,11 +1274,12 @@ void Tr2AnimationRetargeter::StandOnGround( const cmf::Skeleton& skeleton, cmf::
 	for( uint32_t l = 0; l < m_legs.size(); ++l )
 	{
 		const Leg& leg = m_legs[l];
-		if( leg.hipBone == NO_BONE || leg.weight <= 0.f )
+		if( leg.hipBone == NO_BONE )
 		{
 			continue;
 		}
-		// How much higher the foot goes than it is now, and how far it tilts to the ground's slope while planted
+		// How much higher the foot goes than it is now, and how far it tilts to the ground's slope while planted. A leg
+		// not following the ground (weight 0) still takes back the pelvis's drop, keeping its foot where the clips hold it
 		const float raise = leg.weight * leg.ground - drop;
 		Quaternion tilt = IdentityQuaternion();
 		const float planted = Planted( l ) * leg.weight;
