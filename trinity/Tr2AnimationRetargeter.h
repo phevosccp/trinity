@@ -35,6 +35,21 @@ BLUE_DECLARE( Tr2AnimationRetargeter );
  * than the pose the meshes were bound in.  A rig's bind pose may come from its own file too; left empty, it is the
  * skeleton of the rig's first clip, for clips whose rest pose is the bind pose.
  *
+ * A rig's chains (AddChain) share the turn of their paired ends out over the bones between them that the rig does not
+ * pair, by length: a three-bone source spine bends all five bones of the target's.
+ *
+ * Helper drivers (AddHelperDriver) turn helper bones, the twist and corrective joints that skin the body, with the
+ * bones that drive them on the character's own rig: a twist by a share of the driver's twist about an axis, and a
+ * swing by a share of the rest of its turn.  They act on each clip whose rig does not pair the helper, so clips made on the character's own skeleton
+ * keep their helpers' own keys.
+ *
+ * Legs (AddLeg) stand the feet on the ground under them.  Every frame the caller gives each leg the height of the
+ * ground under its foot, in the model's space, relative to the floor the character stands on (SetLegGround); the
+ * pelvis drops to let the lower foot reach, each leg bends to put its foot that much higher or lower than the clips
+ * hold it, and a planted foot tilts to the ground's slope, planted as the clips' contacts say (SetClipContacts).
+ *
+ * Each of these stages, and the pelvis's sway, can be turned off to compare with and without.
+ *
  * The last pose made can be read back, per bone, relative to its parent or in the model's space.  Evaluate makes one
  * without an animation, over the target bind pose, so tools and tests see exactly what the game would.  The animation
  * asks once per mesh that shares it; the same pose asked for again with nothing changed is not made twice.
@@ -58,6 +73,24 @@ public:
 
 	bool GetPelvisSway() const;
 	void SetPelvisSway( bool on );
+	bool GetChainsOn() const;
+	void SetChainsOn( bool on );
+	bool GetHelperDriversOn() const;
+	void SetHelperDriversOn( bool on );
+	bool GetFootIkOn() const;
+	void SetFootIkOn( bool on );
+	float GetIkMaxPelvisDrop() const;
+	void SetIkMaxPelvisDrop( float metres );
+	float GetIkMaxFootTilt() const;
+	void SetIkMaxFootTilt( float degrees );
+
+	bool AddChain( const std::string& rig, const std::string& firstTarget, const std::string& lastTarget );
+	void AddHelperDriver( const std::string& helper, const std::string& driver, const Vector3& driverAxis, const Vector3& helperAxis, float twist, float swing );
+	void ClearHelperDrivers();
+	void AddLeg( const std::string& name, const std::string& hip, const std::string& knee, const std::string& ankle );
+	void ClearLegs();
+	bool SetLegGround( const std::string& name, float height, const Vector3& normal, float weight );
+	bool SetClipContacts( const std::string& clip, const std::string& leg, const std::vector<std::pair<float, float>>& contacts );
 
 	void AddRig( const std::string& name, const std::string& bindPosePath, const std::string& rootBone );
 	bool MapBone( const std::string& rig, const std::string& sourceBone, const std::string& targetBone );
@@ -96,6 +129,17 @@ private:
 		bool fromBind;
 	};
 
+	// A target bone between two paired bones of a chain, which takes a share of their turns
+	struct ChainJoint
+	{
+		int32_t fromLink;	// the paired end above it
+		int32_t toLink;	// the paired end below it
+		float share;	// how far down from the one to the other it sits, 0 to 1, by length
+		Quaternion bindWorld;	// its rotation in the target bind pose, and the ends'
+		Quaternion fromBindWorld;
+		Quaternion toBindWorld;
+	};
+
 	// A skeleton clips were made for: its bind pose, pelvis and bone pairs, and what is built from them while bound
 	struct Rig
 	{
@@ -105,8 +149,11 @@ private:
 		TriGrannyResPtr bindPoseRes;
 		std::vector<BoneMapping> boneMap;
 		bool sameBones = false;	// also pair every bone of the animation's skeleton with the rig's of the same name
+		std::vector<std::pair<std::string, std::string>> chains;	// first and last target bone of each chain
 
 		bool bound = false;
+		std::vector<ChainJoint> chainJoints;
+		std::vector<int32_t> chainJointForTargetBone;	// index into chainJoints, -1 for bones no chain shares out to
 		std::vector<std::string> linkSources;	// per link, the source bone, found in each clip's skeleton
 		std::vector<Quaternion> offsets;	// per link: takes the source bone's animated world rotation to the target bone's
 		std::vector<int32_t> linkForTargetBone;	// index into the links, -1 for bones this rig leaves alone
@@ -131,6 +178,8 @@ private:
 		float weight = 0.f;
 		float phase = 0.f;	// 0 to 1 through the clip
 		std::vector<std::pair<std::string, float>> boneWeightSettings;	// target bone, and how much it and everything below take
+		std::vector<std::pair<std::string, std::vector<std::pair<float, float>>>> contactSettings;	// leg, and when its foot is down
+		std::vector<std::vector<std::pair<float, float>>> legContacts;	// per leg, when its foot is down, as phases
 
 		int32_t rigIndex = -1;
 		const cmf::Skeleton* skeleton = nullptr;
@@ -146,6 +195,41 @@ private:
 		std::vector<cmf::Transform> sourceWorld;
 	};
 
+	// A helper bone turned with a driving bone, each from its bind pose: it twists about helperAxis by a share of the
+	// driver's twist about driverAxis, and swings by a share of the rest of the driver's turn
+	struct HelperDriver
+	{
+		std::string helper;
+		std::string driver;
+		Vector3 driverAxis;	// in the driver's frame
+		Vector3 helperAxis;	// in the helper's frame
+		float twist;
+		float swing;
+
+		uint32_t helperBone = NO_BONE;
+		uint32_t driverBone = NO_BONE;
+		Quaternion helperRest;	// local rotations in the target bind pose
+		Quaternion driverRest;
+		Quaternion toHelper;	// takes a turn in the driver's bind frame into the helper's
+	};
+
+	// A leg the feet are stood on the ground with
+	struct Leg
+	{
+		std::string name;
+		std::string hip;
+		std::string knee;
+		std::string ankle;
+		float ground = 0.f;	// m the ground under the foot is above the character's floor, in the model's space
+		Vector3 normal = Vector3( 0.f, 1.f, 0.f );	// the ground's up there, in the model's space
+		float weight = 0.f;	// how much the leg follows the ground, 0 to 1
+
+		uint32_t pelvisBone = NO_BONE;
+		uint32_t hipBone = NO_BONE;
+		uint32_t kneeBone = NO_BONE;
+		uint32_t ankleBone = NO_BONE;
+	};
+
 	static uint32_t FindBone( const cmf::Skeleton& skeleton, const std::string& name );
 
 	Rig* FindRig( const std::string& name );
@@ -156,6 +240,12 @@ private:
 	uint32_t CountSlotsHolding( const TriGrannyRes* res ) const;
 	bool Bind( const cmf::Skeleton& target );
 	bool BindRig( uint32_t rigIndex, const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
+	void BindChains( Rig& rig, const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
+	void BindHelpersAndLegs( const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
+	void DriveHelpers( const Rig& rig, cmf::SkeletonPose& out ) const;
+	void StandOnGround( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
+	float Planted( uint32_t leg ) const;
+	bool HasGroundToStandOn() const;
 	void Unbind();
 	bool IsPlayable( const Clip& clip ) const;
 	void SampleSource( Clip& clip, float time );
@@ -172,6 +262,16 @@ private:
 	std::string m_targetBindPosePath;
 	TriGrannyResPtr m_targetBindPoseRes;
 	bool m_pelvisSway = true;	// looping clips' pelvises sway about their line of travel
+	bool m_chainsOn = true;
+	bool m_helperDriversOn = true;
+	bool m_footIkOn = true;
+	float m_ikMaxPelvisDrop = 0.3f;	// m
+	float m_ikMaxFootTilt = 30.f;	// degrees
+	std::vector<HelperDriver> m_helperDrivers;
+	std::vector<Leg> m_legs;
+	bool m_legsBound = false;
+	std::vector<Quaternion> m_linkWorld;	// per link of the rig being retargeted, the world rotation its target bone takes
+	std::vector<cmf::Transform> m_ikWorld;
 
 	// Bound state, rebuilt when a file, a rig, a clip or the animation's skeleton changes
 	bool m_needsBind = true;
