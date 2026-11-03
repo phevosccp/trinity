@@ -652,7 +652,9 @@ EveSpaceScene::ShadowResources EveSpaceScene::SetupCascadedShadows( Tr2RenderRea
 
 		// Get the split up camera frustum so we can use it to do some "half space culling" for objects
 		TriFrustum frustum = m_updateContext.GetFrustum();
-		const Matrix viewProj = Inverse( splitSetupInfo.invViewProj );
+		// From the view and the split's projection, not by inverting invViewProj: in float32, far from the origin, that
+		// round trip moves the planes by many metres and culls casters in view
+		const Matrix viewProj = Tr2Renderer::GetViewTransform() * splitSetupInfo.projection;
 		frustum.ExtractFrustum( &viewProj );
 		cameraFrustums[splitIndex] = frustum;
 

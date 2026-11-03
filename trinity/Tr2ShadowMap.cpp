@@ -166,6 +166,8 @@ ShadowMap::SplitSetup Tr2ShadowMap::SetupShadowSplit( int splitIndex, Matrix inv
 
 	m_oldZFar = zFar;
 
+	splitSetup.projection = projection;
+
 	// we can apply the inverse of the view and projection matrices on the corner points of the unit cube to get the frustum corners in world space
 	splitSetup.invViewProj = Inverse( projection ) * invViewTransform;
 

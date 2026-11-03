@@ -45,6 +45,7 @@ struct SplitSetup
 {
 	TriFrustumOrtho shadowFrustum;
 	Matrix lightViewProjection;
+	Matrix projection;	// the camera's projection, cut to this split's depth range
 	Matrix invViewProj;
 	AxisAlignedBoundingBox aabb;
 };
