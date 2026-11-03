@@ -251,6 +251,9 @@ set(_SOURCES
     Eve/Renderable/Stretch/EveLocalPositionCurve.cpp
     Eve/Renderable/Stretch/EveLocalPositionCurve.h
     Eve/Renderable/Stretch/EveLocalPositionCurve_Blue.cpp
+    Eve/Renderable/Stretch/EveLocalRotationCurve.cpp
+    Eve/Renderable/Stretch/EveLocalRotationCurve.h
+    Eve/Renderable/Stretch/EveLocalRotationCurve_Blue.cpp
     Eve/Renderable/Stretch/EveRemotePositionCurve.cpp
     Eve/Renderable/Stretch/EveRemotePositionCurve.h
     Eve/Renderable/Stretch/EveRemotePositionCurve_Blue.cpp
