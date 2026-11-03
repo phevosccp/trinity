@@ -19,6 +19,7 @@
 namespace
 {
 constexpr uint32_t GROUND_SAMPLES = 32;	// poses per clip looked at to find where the feet come down
+constexpr uint32_t TRAVEL_SAMPLES = 32;	// poses per clip looked at to find the middle of the pelvis's sway
 constexpr float FOOT_BAND = 0.05f;	// paired bones this close to the lowest in the target bind pose are feet
 constexpr float MIN_PELVIS_HEIGHT = 1e-3f;	// below this height above the feet, the bob is left unscaled
 
@@ -147,6 +148,17 @@ void Tr2AnimationRetargeter::SetTargetBindPosePath( const std::string& path )
 {
 	m_targetBindPosePath = path;
 	LoadRes( m_targetBindPosePath, m_targetBindPoseRes );
+}
+
+bool Tr2AnimationRetargeter::GetPelvisSway() const
+{
+	return m_pelvisSway;
+}
+
+void Tr2AnimationRetargeter::SetPelvisSway( bool on )
+{
+	m_pelvisSway = on;
+	m_lastPoseCurrent = false;
 }
 
 void Tr2AnimationRetargeter::AddRig( const std::string& name, const std::string& bindPosePath, const std::string& rootBone )
@@ -433,6 +445,7 @@ void Tr2AnimationRetargeter::Unbind()
 		clip.sourceBones.clear();
 		clip.boneWeights.clear();
 		clip.groundOffset = 0.f;
+		clip.travelStart = clip.travel = clip.swayCentre = Vector3( 0.f, 0.f, 0.f );
 	}
 	for( Rig& rig : m_rigs )
 	{
@@ -707,6 +720,10 @@ bool Tr2AnimationRetargeter::BindRig( uint32_t rigIndex, const cmf::Skeleton& ta
 		{
 			clip.sourceBones.push_back( r.source[c] );
 		}
+		if( clip.looping )
+		{
+			MeasureTravel( clip, rig );
+		}
 	}
 	rig.bound = true;
 
@@ -726,14 +743,40 @@ bool Tr2AnimationRetargeter::IsPlayable( const Clip& clip ) const
 	return clip.rigIndex >= 0 && m_rigs[clip.rigIndex].bound && clip.player;
 }
 
+void Tr2AnimationRetargeter::SampleSource( Clip& clip, float time )
+{
+	cmf::RestPose( clip.sourcePose, *clip.skeleton );
+	clip.player->SampleAtLocalTime( clip.sourcePose, time );
+	ComputeWorld( *clip.skeleton, clip.sourcePose.boneTransforms.data(), clip.sourceWorld );
+}
+
+void Tr2AnimationRetargeter::MeasureTravel( Clip& clip, const Rig& rig )
+{
+	// The line the source pelvis travels along, from where it starts to where it ends, and the middle of its sway about
+	// that line, which a clip made in place need not start at
+	const uint32_t pelvis = clip.sourceBones[rig.pelvisLink];
+	SampleSource( clip, 0.f );
+	clip.travelStart = clip.sourceWorld[pelvis].position;
+	SampleSource( clip, clip.duration );
+	clip.travel = clip.sourceWorld[pelvis].position - clip.travelStart;
+
+	Vector3 centre( 0.f, 0.f, 0.f );
+	for( uint32_t k = 0; k < TRAVEL_SAMPLES; ++k )
+	{
+		const float phase = (float)k / TRAVEL_SAMPLES;
+		SampleSource( clip, phase * clip.duration );
+		centre += clip.sourceWorld[pelvis].position - ( clip.travelStart + clip.travel * phase );
+	}
+	clip.swayCentre = centre / (float)TRAVEL_SAMPLES;
+}
+
 void Tr2AnimationRetargeter::Retarget( Clip& clip, float phase, const cmf::Skeleton& skeleton, const cmf::SkeletonPose& base, cmf::SkeletonPose& out )
 {
 	const Rig& rig = m_rigs[clip.rigIndex];
 
 	// Source pose and its world transforms; a clip that does not loop stops at its end
-	cmf::RestPose( clip.sourcePose, *clip.skeleton );
-	clip.player->SampleAtLocalTime( clip.sourcePose, ( clip.looping ? Wrap01( phase ) : Clamp01( phase ) ) * clip.duration );
-	ComputeWorld( *clip.skeleton, clip.sourcePose.boneTransforms.data(), clip.sourceWorld );
+	const float at = clip.looping ? Wrap01( phase ) : Clamp01( phase );
+	SampleSource( clip, at * clip.duration );
 
 	// Retargeted pose: unpaired bones keep the pose below
 	out.skeleton = base.skeleton;
@@ -755,13 +798,20 @@ void Tr2AnimationRetargeter::Retarget( Clip& clip, float phase, const cmf::Skele
 
 			if( i == rig.pelvisTarget )
 			{
-				// Only the bob, if any: the clip plays in place and the caller moves the character
+				// The bob, if any, and a looping clip's sway about its line of travel: the clip plays in place and the
+				// caller moves the character
 				Vector3 wanted = rig.pelvisTargetBindPosition;
 				if( clip.verticalMotion )
 				{
 					wanted.y += ( source.position.y - rig.pelvisSourceBindHeight ) * rig.pelvisHeightScale;
 				}
 				wanted.y += clip.groundOffset;
+				if( clip.looping && m_pelvisSway )
+				{
+					const Vector3 line = clip.travelStart + clip.travel * at + clip.swayCentre;
+					wanted.x += ( source.position.x - line.x ) * rig.pelvisHeightScale;
+					wanted.z += ( source.position.z - line.z ) * rig.pelvisHeightScale;
+				}
 				local.position = cmf::TransformPoint( wanted, cmf::Inverse( parentWorld ) );
 			}
 		}

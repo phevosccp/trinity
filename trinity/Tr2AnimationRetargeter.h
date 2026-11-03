@@ -22,7 +22,9 @@ BLUE_DECLARE( Tr2AnimationRetargeter );
  * bone of the same name that way, for clips made on the animation's own skeleton.  The rig's pelvis also takes the
  * source's up and down bob, scaled by the ratio of the two pelvis heights above the feet (the paired bones lowest in
  * each bind pose), then raised or lowered so that over each clip the target's feet come down exactly to where the
- * sampled pose holds them; the clips play in place.
+ * sampled pose holds them.  The clips play in place: the caller moves the character.  A looping clip's pelvis keeps
+ * its sway, side to side and back and forth, about the line it travels along, scaled the same way; without it the
+ * body above swings further and the planted feet slide.
  *
  * Clips are added by name with AddClip, each for a rig and on a layer, and driven from outside: each has a weight and
  * a phase, 0 to 1 through the clip, set every frame.  Per bone, the clips of a layer blend by their weights times
@@ -53,6 +55,9 @@ public:
 
 	const std::string& GetTargetBindPosePath() const;
 	void SetTargetBindPosePath( const std::string& path );
+
+	bool GetPelvisSway() const;
+	void SetPelvisSway( bool on );
 
 	void AddRig( const std::string& name, const std::string& bindPosePath, const std::string& rootBone );
 	bool MapBone( const std::string& rig, const std::string& sourceBone, const std::string& targetBone );
@@ -134,6 +139,9 @@ private:
 		std::vector<uint32_t> sourceBones;	// per link of the rig, the bone in this clip's skeleton
 		std::vector<float> boneWeights;	// per target bone
 		float groundOffset = 0.f;	// pelvis height change that puts the feet on the ground
+		Vector3 travelStart = Vector3( 0.f, 0.f, 0.f );	// where the source pelvis starts, in the source's model space
+		Vector3 travel = Vector3( 0.f, 0.f, 0.f );	// how far it goes over the clip
+		Vector3 swayCentre = Vector3( 0.f, 0.f, 0.f );	// the middle of its sway about that line, from it
 		cmf::SkeletonPose sourcePose;
 		std::vector<cmf::Transform> sourceWorld;
 	};
@@ -150,6 +158,8 @@ private:
 	bool BindRig( uint32_t rigIndex, const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
 	void Unbind();
 	bool IsPlayable( const Clip& clip ) const;
+	void SampleSource( Clip& clip, float time );
+	void MeasureTravel( Clip& clip, const Rig& rig );
 	void Retarget( Clip& clip, float phase, const cmf::Skeleton& skeleton, const cmf::SkeletonPose& base, cmf::SkeletonPose& out );
 	void CalibrateGround( const cmf::Skeleton& skeleton, const cmf::SkeletonPose& base );
 	void Apply( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
@@ -161,6 +171,7 @@ private:
 	std::vector<Clip> m_clips;
 	std::string m_targetBindPosePath;
 	TriGrannyResPtr m_targetBindPoseRes;
+	bool m_pelvisSway = true;	// looping clips' pelvises sway about their line of travel
 
 	// Bound state, rebuilt when a file, a rig, a clip or the animation's skeleton changes
 	bool m_needsBind = true;

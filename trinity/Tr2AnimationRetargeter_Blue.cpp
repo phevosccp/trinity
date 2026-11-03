@@ -22,6 +22,13 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 
 		MAP_PROPERTY_READONLY( "isReady", IsReady, "True once every clip and the bind pose files have loaded" )
 
+		MAP_PROPERTY(
+			"pelvisSway",
+			GetPelvisSway,
+			SetPelvisSway,
+			"Whether a looping clip's pelvis keeps its sway, side to side and back and forth, about the line it travels\n"
+			"along (on until set).  Off pins it over the feet, as the retargeter did before." )
+
 		MAP_METHOD_AND_WRAP(
 			"AddRig",
 			AddRig,
