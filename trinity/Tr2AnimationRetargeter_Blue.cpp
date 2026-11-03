@@ -112,5 +112,27 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 			":param name: clip name\n"
 			":param on: the pelvis follows the clip's vertical motion" )
 
+		MAP_METHOD_AND_WRAP(
+			"Evaluate",
+			Evaluate,
+			"Evaluate()\n\n"
+			"Makes a pose without an animation: the clips at their weights and phases over the target bind pose, as the\n"
+			"game would make it over the animation's pose.  Read it back with GetLocalTransforms or GetModelTransforms.\n"
+			"Returns False if the retargeter has an animation, a file is still loading, or no rig could be bound." )
+
+		MAP_METHOD_AND_WRAP( "GetBoneNames", GetBoneNames, "The bone names of the last pose made, in the order its transforms come in; empty before one is made" )
+
+		MAP_METHOD_AND_WRAP(
+			"GetLocalTransforms",
+			GetLocalTransforms,
+			"The last pose made, per bone a (position, rotation) relative to its parent; empty before one is made.  With an\n"
+			"animation, this is the pose this retargeter handed it, before the animation's own bone offsets." )
+
+		MAP_METHOD_AND_WRAP(
+			"GetModelTransforms",
+			GetModelTransforms,
+			"The last pose made, per bone a (position, rotation) in the model's space; empty before one is made.  With an\n"
+			"animation, this is the pose this retargeter handed it, before the animation's own bone offsets." )
+
 	EXPOSURE_END()
 }

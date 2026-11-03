@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstring>
 
 // Quaternions compose like the rest of the cmf code: XMQuaternionMultiply( a, b ) applies a, then b, and
 // XMVector3Rotate applies a rotation to a vector.  A world rotation takes bone space to model space.
@@ -120,6 +121,7 @@ void Tr2AnimationRetargeter::SetAnimation( Tr2GrannyAnimation* animation )
 	}
 
 	m_animation = animation;
+	m_lastPoseCurrent = false;
 
 	if( m_animation )
 	{
@@ -250,6 +252,7 @@ bool Tr2AnimationRetargeter::SetClipWeight( const std::string& name, float weigh
 		return false;
 	}
 	clip->weight = weight;
+	m_lastPoseCurrent = false;
 	return true;
 }
 
@@ -261,6 +264,7 @@ bool Tr2AnimationRetargeter::SetClipPhase( const std::string& name, float phase 
 		return false;
 	}
 	clip->phase = phase;
+	m_lastPoseCurrent = false;
 	return true;
 }
 
@@ -297,6 +301,7 @@ bool Tr2AnimationRetargeter::SetClipVerticalMotion( const std::string& name, boo
 		clip->verticalMotion = on;
 		// Where the feet come down changes with the bob
 		m_groundCalibrated = false;
+		m_lastPoseCurrent = false;
 	}
 	return true;
 }
@@ -441,6 +446,10 @@ void Tr2AnimationRetargeter::Unbind()
 	m_bound = false;
 	m_boundTargetBoneCount = 0;
 	m_groundCalibrated = false;
+
+	// The skeleton the last pose was made on may be the data being released
+	m_lastSkeleton = nullptr;
+	m_lastPoseCurrent = false;
 }
 
 bool Tr2AnimationRetargeter::Bind( const cmf::Skeleton& target )
@@ -802,6 +811,108 @@ void Tr2AnimationRetargeter::ModifyPose( const cmf::Skeleton& skeleton, cmf::Ske
 {
 	TRINITY_STATS_ZONE( __FUNCTION__ );
 
+	// The animation asks once per mesh that shares it; the pose made for the first serves the rest
+	if( IsLastPose( skeleton, pose ) )
+	{
+		pose.boneTransforms = m_lastPose.boneTransforms;
+		return;
+	}
+	m_lastInput = pose.boneTransforms;
+
+	Apply( skeleton, pose );
+
+	m_lastSkeleton = &skeleton;
+	m_lastPose = pose;
+	m_lastPoseCurrent = true;
+}
+
+bool Tr2AnimationRetargeter::IsLastPose( const cmf::Skeleton& skeleton, const cmf::SkeletonPose& input ) const
+{
+	if( !m_lastPoseCurrent || m_needsBind || m_lastSkeleton != &skeleton || m_lastInput.size() != input.boneTransforms.size() )
+	{
+		return false;
+	}
+	for( size_t i = 0; i < m_lastInput.size(); ++i )
+	{
+		const cmf::Transform& a = m_lastInput[i];
+		const cmf::Transform& b = input.boneTransforms[i];
+		if( memcmp( &a.position, &b.position, sizeof( a.position ) ) != 0 || memcmp( &a.rotation, &b.rotation, sizeof( a.rotation ) ) != 0 || memcmp( &a.scale, &b.scale, sizeof( a.scale ) ) != 0 )
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool Tr2AnimationRetargeter::Evaluate()
+{
+	if( m_animation )
+	{
+		CCP_LOGWARN( "Tr2AnimationRetargeter: Evaluate is for a retargeter without an animation; its last pose can be read back instead" );
+		return false;
+	}
+	const cmf::Data* bind = GetData( m_targetBindPoseRes );
+	if( !bind || !IsReady() )
+	{
+		return false;
+	}
+	const cmf::Skeleton& skeleton = bind->skeletons[0];
+	if( m_needsBind || m_boundTargetBoneCount != skeleton.bones.size() )
+	{
+		Bind( skeleton );
+	}
+	cmf::SkeletonPose pose;
+	cmf::RestPose( pose, skeleton );
+	ModifyPose( skeleton, pose );
+	return m_bound;
+}
+
+std::vector<std::string> Tr2AnimationRetargeter::GetBoneNames() const
+{
+	std::vector<std::string> names;
+	if( m_lastSkeleton )
+	{
+		names.reserve( m_lastSkeleton->bones.size() );
+		for( const auto& bone : m_lastSkeleton->bones )
+		{
+			names.push_back( cmf::ToStdString( bone ) );
+		}
+	}
+	return names;
+}
+
+std::vector<std::pair<Vector3, Quaternion>> Tr2AnimationRetargeter::GetLocalTransforms() const
+{
+	std::vector<std::pair<Vector3, Quaternion>> transforms;
+	if( m_lastSkeleton )
+	{
+		transforms.reserve( m_lastPose.boneTransforms.size() );
+		for( const cmf::Transform& t : m_lastPose.boneTransforms )
+		{
+			transforms.emplace_back( t.position, t.rotation );
+		}
+	}
+	return transforms;
+}
+
+std::vector<std::pair<Vector3, Quaternion>> Tr2AnimationRetargeter::GetModelTransforms() const
+{
+	std::vector<std::pair<Vector3, Quaternion>> transforms;
+	if( m_lastSkeleton && m_lastPose.boneTransforms.size() == m_lastSkeleton->bones.size() )
+	{
+		std::vector<cmf::Transform> world;
+		ComputeWorld( *m_lastSkeleton, m_lastPose.boneTransforms.data(), world );
+		transforms.reserve( world.size() );
+		for( const cmf::Transform& t : world )
+		{
+			transforms.emplace_back( t.position, t.rotation );
+		}
+	}
+	return transforms;
+}
+
+void Tr2AnimationRetargeter::Apply( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose )
+{
 	float total = 0.f;
 	for( const Clip& clip : m_clips )
 	{

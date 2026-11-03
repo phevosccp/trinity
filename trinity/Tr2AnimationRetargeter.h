@@ -32,6 +32,10 @@ BLUE_DECLARE( Tr2AnimationRetargeter );
  * The target bind pose comes from its own file because the animation's skeleton may hold a frame of animation rather
  * than the pose the meshes were bound in.  A rig's bind pose may come from its own file too; left empty, it is the
  * skeleton of the rig's first clip, for clips whose rest pose is the bind pose.
+ *
+ * The last pose made can be read back, per bone, relative to its parent or in the model's space.  Evaluate makes one
+ * without an animation, over the target bind pose, so tools and tests see exactly what the game would.  The animation
+ * asks once per mesh that shares it; the same pose asked for again with nothing changed is not made twice.
  */
 BLUE_CLASS( Tr2AnimationRetargeter ) :
 	public IRoot,
@@ -64,6 +68,11 @@ public:
 	bool SetClipVerticalMotion( const std::string& name, bool on );
 
 	bool IsReady() const;
+
+	bool Evaluate();
+	std::vector<std::string> GetBoneNames() const;
+	std::vector<std::pair<Vector3, Quaternion>> GetLocalTransforms() const;
+	std::vector<std::pair<Vector3, Quaternion>> GetModelTransforms() const;
 
 	// ITr2PoseModifier
 	void ModifyPose( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose ) override;
@@ -143,6 +152,8 @@ private:
 	bool IsPlayable( const Clip& clip ) const;
 	void Retarget( Clip& clip, float phase, const cmf::Skeleton& skeleton, const cmf::SkeletonPose& base, cmf::SkeletonPose& out );
 	void CalibrateGround( const cmf::Skeleton& skeleton, const cmf::SkeletonPose& base );
+	void Apply( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
+	bool IsLastPose( const cmf::Skeleton& skeleton, const cmf::SkeletonPose& input ) const;
 
 	Tr2GrannyAnimationPtr m_animation;
 
@@ -163,6 +174,12 @@ private:
 	cmf::SkeletonPose m_clipPose;
 	cmf::SkeletonPose m_layerPose;
 	std::vector<cmf::Transform> m_targetWorld;
+
+	// The last pose made, what it was made from, and whether a setting has changed since
+	const cmf::Skeleton* m_lastSkeleton = nullptr;
+	std::vector<cmf::Transform> m_lastInput;
+	cmf::SkeletonPose m_lastPose;
+	bool m_lastPoseCurrent = false;
 };
 
 TYPEDEF_BLUECLASS( Tr2AnimationRetargeter );
