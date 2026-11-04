@@ -80,6 +80,10 @@
     {
       "name": "carbon-mesh",
       "version>=": "1.0.1"
+    },
+    {
+      "name": "joltphysics",
+      "version>=": "5.5.0"
     }
   ],
   "features": {

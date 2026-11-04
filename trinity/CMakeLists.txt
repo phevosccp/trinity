@@ -33,6 +33,30 @@ else()
     find_package(carbon-destiny CONFIG REQUIRED)
 endif()
 
+# Rigid bodies, constraints and ragdolls at a character's scale (Tr2PhysicsWorld), on Jolt Physics, linked statically.
+# Only Tr2PhysicsWorld.cpp includes Jolt, and only it is compiled with Jolt's settings: Jolt's own usage requirements
+# carry NDEBUG, which would change Debug and TrinityDev builds of everything else in the pyd, so the library and its
+# headers are taken without them.  TRINITY_JOLT_DEFINITIONS are the settings vcpkg's release build of Jolt was made
+# with; Jolt aborts on a mismatch, so Tr2PhysicsWorld checks them first (VerifyJoltVersionID) and turns itself off.
+if(NOT BUILD_FOR_PYTHON_2)
+    find_package(Jolt CONFIG REQUIRED)
+    set_target_properties(Jolt::Jolt PROPERTIES
+        MAP_IMPORTED_CONFIG_DEBUG Release
+        MAP_IMPORTED_CONFIG_INTERNAL Release
+        MAP_IMPORTED_CONFIG_TRINITYDEV Release
+    )
+    set(TRINITY_PHYSICS_SOURCES
+        Tr2PhysicsWorld.cpp
+        Tr2PhysicsWorld.h
+        Tr2PhysicsWorld_Blue.cpp
+    )
+    set(TRINITY_JOLT_DEFINITIONS JPH_FLOATING_POINT_EXCEPTIONS_ENABLED JPH_OBJECT_STREAM)
+    set_source_files_properties(Tr2PhysicsWorld.cpp PROPERTIES
+        COMPILE_DEFINITIONS "${TRINITY_JOLT_DEFINITIONS}"
+        SKIP_PRECOMPILE_HEADERS ON
+    )
+endif()
+
 set(PUBLIC_HEADER_FILES
     Include/ITr2AnimationUpdater.h
     Include/ITr2BoundingBox.h
@@ -1840,6 +1864,7 @@ if(WITH_GRANNY)
     list(APPEND _SOURCES ${GRANNY_RELATED_SOURCES})
 endif()
 
+list(APPEND _SOURCES ${TRINITY_PHYSICS_SOURCES})
 
 # Ensure that we have a sane file grouping for XCode and VS project files
 if(CMAKE_GENERATOR STREQUAL "Xcode" OR CMAKE_GENERATOR MATCHES "Visual Studio.*")
@@ -1897,6 +1922,11 @@ function(set_shared_trinity_properties target)
 			GPUOpen::VulkanMemoryAllocator
             CarbonMesh
     )
+    if(NOT BUILD_FOR_PYTHON_2)
+        # Jolt's library and headers without its usage requirements (see find_package(Jolt) at the top)
+        target_link_libraries(${target} PRIVATE $<TARGET_FILE:Jolt::Jolt>)
+        target_include_directories(${target} PRIVATE $<TARGET_PROPERTY:Jolt::Jolt,INTERFACE_INCLUDE_DIRECTORIES>)
+    endif()
 
     target_sources(${target} PRIVATE ${_SOURCES})
     if(WITH_GRANNY)
