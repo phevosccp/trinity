@@ -311,6 +311,7 @@ public:
 	void EnsureChildLocatorMerged() const;
 	void UpdateDamageLocatorFilter();
 	EveDamageOverlayPtr EnsureChildDamageOverlay( const LocatorSourceRange& range );
+	const LocatorSourceRange* FindPartDamageRange( int damageLocatorIndex ) const;
 	void CollectPartDamageOverlays( std::vector<std::pair<EveDamageOverlay*, int32_t>> & out );
 
 	//////////////////////////////////////////////////////////////////////////////////////
@@ -363,6 +364,8 @@ public:
 	float GetRadius() const;
 	int CreateImpact( int damageLocatorIndex, const Vector3& direction, float lifeTime, float size );
 	int CreateImpactFromPosition( const Vector3& position, const Vector3& direction, float lifeTime, float size );
+	bool SetDamageLocatorHole( int damageLocatorIndex, float size );
+	float GetDamageLocatorHole( int damageLocatorIndex );
 	void SetLastDamageLocatorHit( unsigned int locator );
 
 	bool UpdateImpact( Vector3 & out, const Vector3& direction, int impactIndex );
@@ -535,6 +538,8 @@ public:
 	void SetImpactDamageState( float shield, float armor, float hull, bool doCreateArmorImpacts );
 	void SetImpactAnimation( const std::string& name, bool enable, float duration );
 	void ClearImpactDamage();
+	// held holes stay in the parts' overlays, and in the object's own unless keepOwnHeldHoles is false
+	void ClearImpactDamageKeepingHeldHoles( bool keepOwnHeldHoles = true );
 
 	int GetLastDamageLocatorHit();
 

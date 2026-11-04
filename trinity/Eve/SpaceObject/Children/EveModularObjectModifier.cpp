@@ -165,7 +165,9 @@ BlueStdResult EveModularObjectModifier::Remove( EveSpaceObjectChild::PartTag par
 	}
 	m_data->m_parts.erase( found );
 	m_object->InvalidateMergedLocators( LocatorInvalidationReason::StructureChanged );
-	m_object->ClearImpactDamage();
+	// a part's held holes are at its own locators, which removing another leaves where they were; the object's own
+	// are at merged indices, which may move
+	m_object->ClearImpactDamageKeepingHeldHoles( false );
 	UpdateImpactOverlayLocatorCount();
 	return BlueStdResultType::BLUE_STD_RESULT_OK;
 }

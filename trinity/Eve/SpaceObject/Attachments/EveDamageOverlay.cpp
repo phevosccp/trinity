@@ -237,15 +237,21 @@ int EveDamageOverlay::AllocateImpactIndex()
 // --------------------------------------------------------------------------------
 void EveDamageOverlay::UpdateAsyncronous( const EveUpdateContext& updateContext, const OwnerInfo& info, size_t minTexelRows, bool hasExternalActivity )
 {
-	// check if the impact count goal is less than what we have
-	if( m_armorImpactGoalCount < m_armorImpactData.size() )
+	// check if the impact count goal is less than what we have; held holes count for neither
+	if( m_armorImpactGoalCount < CountUnheldImpacts() )
 	{
-		// close up only the excess holes, so get an "advanced" map iterator
+		// close up only the excess holes, past the first goal count of them
+		size_t kept = 0;
 		auto aidit = m_armorImpactData.begin();
-		std::advance( aidit, m_armorImpactGoalCount );
 		// ok, we want to have less impacts, so close the holes
 		while( aidit != m_armorImpactData.end() )
 		{
+			if( aidit->second.held || kept < m_armorImpactGoalCount )
+			{
+				kept += aidit->second.held ? 0 : 1;
+				++aidit;
+				continue;
+			}
 			aidit->second.size -= updateContext.GetDeltaT() / m_armorImpactLifeTime;
 			if( aidit->second.size <= 0.f )
 			{
@@ -480,14 +486,21 @@ void EveDamageOverlay::SetDamageState( float shield, float armor, float hull, bo
 	if( doCreateArmorImpacts && !m_enabledDamageLocators.empty() )
 	{
 		// create a random seed that is m_seed and also the armor impact size (so we get some variation into the damage)
+		const size_t unheld = CountUnheldImpacts();
 		auto generator = std::mt19937();
-		generator.seed( m_seed + (unsigned)m_armorImpactData.size() );
+		generator.seed( m_seed + (unsigned)unheld );
 		std::uniform_int_distribution<int> damageLocatorDistribution( 0, int( m_enabledDamageLocators.size() ) - 1 );
 		std::uniform_real_distribution<float> damageSizeDistribution( 0.2f, 0.8f );
 
-		for( size_t i = m_armorImpactData.size(); i < m_armorImpactGoalCount; ++i )
+		for( size_t i = unheld; i < m_armorImpactGoalCount; ++i )
 		{
-			CreateImpact( m_enabledDamageLocators[damageLocatorDistribution( generator )], damageSizeDistribution( generator ), m_debugForceSpawnDebris );
+			int damageLocatorIndex = m_enabledDamageLocators[damageLocatorDistribution( generator )];
+			// a held hole is the caller's to size: the armor's go at other locators, if a few draws find one
+			for( int draw = 0; m_heldHoleCount > 0 && draw < 8 && IsHeld( damageLocatorIndex ); ++draw )
+			{
+				damageLocatorIndex = m_enabledDamageLocators[damageLocatorDistribution( generator )];
+			}
+			CreateImpact( damageLocatorIndex, damageSizeDistribution( generator ), m_debugForceSpawnDebris );
 		}
 	}
 
@@ -502,6 +515,15 @@ void EveDamageOverlay::Clear()
 {
 	// remove all impacts
 	m_armorImpactData.clear();
+	m_heldHoleCount = 0;
+}
+
+void EveDamageOverlay::ClearKeepingHeldHoles()
+{
+	for( auto it = m_armorImpactData.begin(); it != m_armorImpactData.end(); )
+	{
+		it = it->second.held ? std::next( it ) : m_armorImpactData.erase( it );
+	}
 }
 
 // --------------------------------------------------------------------------------
@@ -515,6 +537,11 @@ int EveDamageOverlay::CreateImpact( int damageLocatorIndex, float size, bool spa
 	{
 		if( damageLocatorIndex == it->second.damageLocatorIndex )
 		{
+			// a held hole is sized by whoever holds it
+			if( it->second.held )
+			{
+				return it->first;
+			}
 			// only update the size when it is bigger, so smaller lasers won't shrink the hole
 			it->second.size = std::max( size, it->second.size );
 			// spawn debris depends on the quality setting
@@ -535,6 +562,70 @@ int EveDamageOverlay::CreateImpact( int damageLocatorIndex, float size, bool spa
 bool EveDamageOverlay::HasImpact( int impactIndex ) const
 {
 	return m_armorImpactData.find( impactIndex ) != m_armorImpactData.end();
+}
+
+// --------------------------------------------------------------------------------
+// Description:
+//   A hole held at one damage locator, kept at its size whatever the armor fraction
+//   asks for, until set again: a breach to repair.  A size of 0 or less takes away the
+//   hole there, held or not; sizes go up to 1.  A hole already at the locator becomes
+//   the held one.  Neither the armor fraction nor impacts change a held hole.
+// --------------------------------------------------------------------------------
+void EveDamageOverlay::SetHole( int damageLocatorIndex, float size )
+{
+	auto existing = std::find_if( m_armorImpactData.begin(), m_armorImpactData.end(), [&]( const auto& impact ) { return impact.second.damageLocatorIndex == damageLocatorIndex; } );
+	if( !( size > 0.f ) )
+	{
+		if( existing != m_armorImpactData.end() )
+		{
+			m_heldHoleCount -= existing->second.held ? 1 : 0;
+			m_armorImpactData.erase( existing );
+		}
+		return;
+	}
+	if( existing == m_armorImpactData.end() )
+	{
+		ArmorImpactData aid;
+		aid.damageLocatorIndex = damageLocatorIndex;
+		aid.requestSpawnDebris = false;
+		existing = m_armorImpactData.emplace( AllocateImpactIndex(), aid ).first;
+	}
+	m_heldHoleCount += existing->second.held ? 0 : 1;
+	existing->second.size = std::min( size, 1.f );
+	existing->second.held = true;
+}
+
+bool EveDamageOverlay::IsHeld( int damageLocatorIndex ) const
+{
+	return std::any_of( m_armorImpactData.begin(), m_armorImpactData.end(), [&]( const auto& impact ) { return impact.second.held && impact.second.damageLocatorIndex == damageLocatorIndex; } );
+}
+
+float EveDamageOverlay::GetHole( int damageLocatorIndex ) const
+{
+	for( const auto& impact : m_armorImpactData )
+	{
+		if( impact.second.damageLocatorIndex == damageLocatorIndex )
+		{
+			return impact.second.size;
+		}
+	}
+	return 0.f;
+}
+
+std::vector<std::pair<int, float>> EveDamageOverlay::GetHoles() const
+{
+	std::vector<std::pair<int, float>> holes;
+	holes.reserve( m_armorImpactData.size() );
+	for( const auto& impact : m_armorImpactData )
+	{
+		holes.emplace_back( impact.second.damageLocatorIndex, impact.second.size );
+	}
+	return holes;
+}
+
+size_t EveDamageOverlay::CountUnheldImpacts() const
+{
+	return m_armorImpactData.size() - m_heldHoleCount;
 }
 
 // --------------------------------------------------------------------------------

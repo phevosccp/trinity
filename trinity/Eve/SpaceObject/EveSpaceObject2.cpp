@@ -2196,10 +2196,10 @@ void EveSpaceObject2::UpdateDamageLocatorFilter()
 	m_damageFilterState = DamageFilterState::Idle;
 	m_damageLocatorFilterRequested = false;
 
-	// Set impact state again.
+	// Set impact state again; a breach held at a locator stays
 	if( m_impactOverlay && m_impactOverlay->GetArmorImpactGoalCount() > 0 )
 	{
-		ClearImpactDamage();
+		ClearImpactDamageKeepingHeldHoles();
 		Vector3 lastDamageState = m_impactOverlay->GetLastDamageState();
 		SetImpactDamageState( lastDamageState.x, lastDamageState.y, lastDamageState.z, true );
 	}
@@ -3624,6 +3624,33 @@ void EveSpaceObject2::ClearImpactDamage()
 	}
 }
 
+void EveSpaceObject2::ClearImpactDamageKeepingHeldHoles( bool keepOwnHeldHoles )
+{
+	if( m_impactOverlay )
+	{
+		if( keepOwnHeldHoles )
+		{
+			m_impactOverlay->ClearKeepingHeldHoles();
+		}
+		else
+		{
+			m_impactOverlay->Clear();
+		}
+	}
+
+	EnsureChildLocatorMerged();
+	for( const auto& range : m_mergedDamageLocatorSources )
+	{
+		if( range.owner )
+		{
+			if( EveDamageOverlayPtr overlay = range.owner->GetPartDamageOverlay( range.partTag ) )
+			{
+				overlay->ClearKeepingHeldHoles();
+			}
+		}
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Description:
 //   Create an impact effect on this object
@@ -3636,20 +3663,16 @@ int EveSpaceObject2::CreateImpact( int damageLocatorIndex, const Vector3& direct
 		ITriTargetable::ImpactConfiguration configuration = m_impactOverlay->GetImpactConfiguration();
 		if( configuration == ITriTargetable::IMPACT_ARMOR || configuration == ITriTargetable::IMPACT_HULL )
 		{
-			EnsureChildLocatorMerged();
-			for( const auto& range : m_mergedDamageLocatorSources )
+			if( const LocatorSourceRange* range = FindPartDamageRange( damageLocatorIndex ) )
 			{
-				if( range.owner && damageLocatorIndex >= range.start && damageLocatorIndex < range.start + range.count )
+				if( !g_eveSpaceObjectImpactEffectEnabled )
 				{
-					if( !g_eveSpaceObjectImpactEffectEnabled )
-					{
-						return -1;
-					}
-					if( EveDamageOverlayPtr overlay = EnsureChildDamageOverlay( range ) )
-					{
-						bool spawnEffects = m_lodLevel != TR2_LOD_LOW;
-						return overlay->CreateImpact( damageLocatorIndex - range.start, size, spawnEffects );
-					}
+					return -1;
+				}
+				if( EveDamageOverlayPtr overlay = EnsureChildDamageOverlay( *range ) )
+				{
+					bool spawnEffects = m_lodLevel != TR2_LOD_LOW;
+					return overlay->CreateImpact( damageLocatorIndex - range->start, size, spawnEffects );
 				}
 			}
 		}
@@ -3678,6 +3701,64 @@ int EveSpaceObject2::CreateImpactFromPosition( const Vector3& position, const Ve
 {
 	int closestDamageLocator = GetClosestDamageLocatorIndex( &position );
 	return CreateImpact( closestDamageLocator, direction, lifeTime, size );
+}
+
+// -----------------------------------------------------------------------------
+// Description:
+//   Hold a hole at one damage locator, apart from the armor fraction's holes, until
+//   set again; 0 takes it away.  A locator a part owns goes to that part's overlay,
+//   as CreateImpact's do.  False with no impact overlay or no such locator.
+// -----------------------------------------------------------------------------
+bool EveSpaceObject2::SetDamageLocatorHole( int damageLocatorIndex, float size )
+{
+	if( !m_impactOverlay || damageLocatorIndex < 0 || damageLocatorIndex >= int( GetDamageLocatorCount() ) )
+	{
+		return false;
+	}
+	if( const LocatorSourceRange* range = FindPartDamageRange( damageLocatorIndex ) )
+	{
+		EveDamageOverlayPtr overlay = EnsureChildDamageOverlay( *range );
+		if( !overlay )
+		{
+			return false;
+		}
+		overlay->SetHole( damageLocatorIndex - range->start, size );
+		return true;
+	}
+	m_impactOverlay->GetDamageOverlay()->SetHole( damageLocatorIndex, size );
+	return true;
+}
+
+float EveSpaceObject2::GetDamageLocatorHole( int damageLocatorIndex )
+{
+	if( !m_impactOverlay )
+	{
+		return 0.f;
+	}
+	if( const LocatorSourceRange* range = FindPartDamageRange( damageLocatorIndex ) )
+	{
+		EveDamageOverlay* overlay = range->owner->GetPartDamageOverlay( range->partTag );
+		return overlay ? overlay->GetHole( damageLocatorIndex - range->start ) : 0.f;
+	}
+	return m_impactOverlay->GetDamageOverlay()->GetHole( damageLocatorIndex );
+}
+
+// -----------------------------------------------------------------------------
+// Description:
+//   The range of merged damage locators a part owns that holds this index; none
+//   for the object's own locators.
+// -----------------------------------------------------------------------------
+const LocatorSourceRange* EveSpaceObject2::FindPartDamageRange( int damageLocatorIndex ) const
+{
+	EnsureChildLocatorMerged();
+	for( const auto& range : m_mergedDamageLocatorSources )
+	{
+		if( range.owner && damageLocatorIndex >= range.start && damageLocatorIndex < range.start + range.count )
+		{
+			return &range;
+		}
+	}
+	return nullptr;
 }
 
 // -----------------------------------------------------------------------------

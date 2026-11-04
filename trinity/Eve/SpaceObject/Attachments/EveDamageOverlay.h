@@ -57,6 +57,7 @@ public:
 		int damageLocatorIndex;
 		float size;
 		bool requestSpawnDebris;
+		bool held = false;	// set with SetHole: kept at its size whatever the armor fraction, until set again
 	};
 
 	// what the overlay needs to know about whoever owns it
@@ -121,11 +122,17 @@ public:
 	// set the damages
 	void SetDamageState( float shield, float armor, float hull, bool doCreateArmorImpacts );
 	void Clear();
+	void ClearKeepingHeldHoles();	// all but the holes held with SetHole
 
 	// control impacts
 	int CreateImpact( int damageLocatorIndex, float size, bool spawnEffects );
 	bool HasImpact( int impactIndex ) const;
 	int AllocateImpactIndex();
+
+	// holes held at one damage locator each, apart from the armor fraction's: a breach to repair
+	void SetHole( int damageLocatorIndex, float size );
+	float GetHole( int damageLocatorIndex ) const;
+	std::vector<std::pair<int, float>> GetHoles() const;
 
 	// helper for checking activity
 	bool HasGeneralActivity() const;
@@ -138,8 +145,12 @@ public:
 	std::map<int, ArmorImpactData>& ArmorImpacts();
 
 private:
+	size_t CountUnheldImpacts() const;
+	bool IsHeld( int damageLocatorIndex ) const;
+
 	// general data
 	bool m_display;
+	size_t m_heldHoleCount = 0;	// of m_armorImpactData, the holes held with SetHole
 	ITriTargetable::ImpactConfiguration m_configuration;
 	int m_impactDataNextIdx;
 	// when set, impact indices come from this overlay's counter instead, so a ship and all

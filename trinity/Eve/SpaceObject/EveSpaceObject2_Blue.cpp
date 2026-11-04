@@ -579,6 +579,21 @@ const Be::ClassInfo* EveSpaceObject2::ExposeToBlue()
 			":param direction: incoming damage direction\n"
 			":param lifeTime: effect time\n"
 			":param size: effect size" );
+		MAP_METHOD_AND_WRAP(
+			"SetDamageLocatorHole",
+			SetDamageLocatorHole,
+			"SetDamageLocatorHole( index, size )\n\n"
+			"Holds a hole at one damage locator, apart from the holes the armor fraction makes and closes, until set again:\n"
+			"a breach to repair, healed by setting a smaller size, or 0 to close it.  Returns False with no impact overlay\n"
+			"or no such locator.\n"
+			":param index: damage locator index, as GetDamageLocatorCount counts them\n"
+			":param size: hole size, 0 to 1 as the armor's holes are (0.2 to 0.8)" );
+		MAP_METHOD_AND_WRAP(
+			"GetDamageLocatorHole",
+			GetDamageLocatorHole,
+			"GetDamageLocatorHole( index )\n\n"
+			"The size of the hole at a damage locator, held or the armor fraction's, 0 if none.\n"
+			":param index: damage locator index" );
 		MAP_METHOD_AND_WRAP( "IsImpostor", IsImpostor, "Is this object in the impostor mode?" );
 
 		MAP_ATTRIBUTE(

@@ -550,6 +550,12 @@ void EveImpactOverlay::Clear()
 	m_damageOverlay->Clear();
 }
 
+void EveImpactOverlay::ClearKeepingHeldHoles()
+{
+	m_shieldImpactData.clear();
+	m_damageOverlay->ClearKeepingHeldHoles();
+}
+
 // --------------------------------------------------------------------------------
 // Description:
 //   Use this method to add a new impact effect. Internal states determines

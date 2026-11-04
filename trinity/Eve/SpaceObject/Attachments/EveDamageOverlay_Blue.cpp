@@ -53,6 +53,14 @@ const Be::ClassInfo* EveDamageOverlay::ExposeToBlue()
 			CreateImpact,
 			"Creates an armor impact hole at the given damage locator index.\n" )
 		MAP_METHOD_AND_WRAP(
+			"SetHole",
+			SetHole,
+			"SetHole( damageLocatorIndex, size )\n\n"
+			"Holds a hole of that size at a damage locator, whatever the armor fraction asks for, until set again: a breach\n"
+			"to repair.  A size of 0 or less takes away the hole there, held or not.\n" )
+		MAP_METHOD_AND_WRAP( "GetHole", GetHole, "GetHole( damageLocatorIndex )\n\nThe size of the hole at a damage locator, 0 if none.\n" )
+		MAP_METHOD_AND_WRAP( "GetHoles", GetHoles, "Every hole, as (damageLocatorIndex, size), held or not, in the order they were made.\n" )
+		MAP_METHOD_AND_WRAP(
 			"GetArmorImpactLifeTime",
 			GetArmorImpactLifeTime,
 			"Value for how long the overlay effect plays.\n" )
