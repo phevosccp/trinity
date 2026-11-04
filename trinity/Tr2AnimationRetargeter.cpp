@@ -22,6 +22,7 @@ constexpr uint32_t GROUND_SAMPLES = 32;	// poses per clip looked at to find wher
 constexpr uint32_t TRAVEL_SAMPLES = 32;	// poses per clip looked at to find the middle of the pelvis's sway
 constexpr float FOOT_BAND = 0.05f;	// paired bones this close to the lowest in the target bind pose are feet
 constexpr float MIN_PELVIS_HEIGHT = 1e-3f;	// below this height above the feet, the bob is left unscaled
+constexpr size_t MAX_FIRED_EVENTS = 256;	// events kept unread; past this the oldest go
 
 // Parents precede children, so a real parent always has the smaller index
 bool HasParent( const cmf::Skeleton& skeleton, uint32_t bone )
@@ -29,10 +30,36 @@ bool HasParent( const cmf::Skeleton& skeleton, uint32_t bone )
 	return skeleton.parents[bone] < bone;
 }
 
-void ComputeWorld( const cmf::Skeleton& skeleton, const cmf::Transform* locals, std::vector<cmf::Transform>& world )
+bool AllFinite( const Vector3& v )
+{
+	return std::isfinite( v.x ) && std::isfinite( v.y ) && std::isfinite( v.z );
+}
+
+// The entry of that name, added at the end if there is none
+template<typename T>
+T& FindOrAdd( std::vector<T>& entries, const std::string& name )
+{
+	auto existing = std::find_if( entries.begin(), entries.end(), [&]( const T& entry ) { return entry.name == name; } );
+	T& entry = existing != entries.end() ? *existing : entries.emplace_back();
+	entry.name = name;
+	return entry;
+}
+
+// Whether ancestor is bone or above it
+bool IsAncestor( const cmf::Skeleton& skeleton, uint32_t ancestor, uint32_t bone )
+{
+	while( bone != ancestor && HasParent( skeleton, bone ) )
+	{
+		bone = skeleton.parents[bone];
+	}
+	return bone == ancestor;
+}
+
+// From bone from on: the bones before it are not below it, so stay as they were
+void ComputeWorld( const cmf::Skeleton& skeleton, const cmf::Transform* locals, std::vector<cmf::Transform>& world, uint32_t from = 0 )
 {
 	world.resize( skeleton.bones.size() );
-	for( uint32_t i = 0; i < world.size(); ++i )
+	for( uint32_t i = from; i < world.size(); ++i )
 	{
 		world[i] = HasParent( skeleton, i ) ? cmf::Multiply( locals[i], world[skeleton.parents[i]] ) : locals[i];
 	}
@@ -107,6 +134,54 @@ void SwingTwist( const Quaternion& q, const Vector3& axis, Quaternion& swing, Qu
 	const float length = sqrtf( along * along + q.w * q.w );
 	twist = length < 1e-6f ? IdentityQuaternion() : Quaternion( axis.x * along / length, axis.y * along / length, axis.z * along / length, q.w / length );
 	swing = XMQuaternionNormalize( Hamilton( q, XMQuaternionConjugate( twist ) ) );
+}
+
+// The turns, in the model's space, that put a two-bone limb's end (an ankle, a wrist) on target, or as near as it
+// reaches along the line to it: bend, at the middle joint, opens or closes the limb in the plane it bends in now (a
+// straight limb in the plane that holds straightBend, the way its end goes as it bends), then swing, at the top, turns
+// the whole limb to the target.  False if the limb has no length or no plane to bend in.
+bool SolveTwoBone( const Vector3& top, const Vector3& middle, const Vector3& end, const Vector3& target, const Vector3& straightBend, Quaternion& bend, Quaternion& swing )
+{
+	const float upper = Length( middle - top );
+	const float lower = Length( end - middle );
+	if( upper < 1e-4f || lower < 1e-4f )
+	{
+		return false;
+	}
+	const float reach = std::max( fabsf( upper - lower ) + 1e-4f, std::min( upper + lower - 1e-4f, Length( target - top ) ) );
+
+	// Bend the middle joint to the angle that puts the end that far from the top
+	const Vector3 toEnd = end - middle;
+	const Vector3 alongUpper = ( top - middle ) / upper;
+	Vector3 across = toEnd - alongUpper * Dot( toEnd, alongUpper );
+	if( Length( across ) < 1e-5f )
+	{
+		across = straightBend - alongUpper * Dot( straightBend, alongUpper );
+	}
+	if( Length( across ) < 1e-5f )
+	{
+		return false;
+	}
+	across = across / Length( across );
+	const float cosMiddle = std::max( -1.f, std::min( 1.f, ( upper * upper + lower * lower - reach * reach ) / ( 2.f * upper * lower ) ) );
+	const float middleAngle = acosf( cosMiddle );
+	const Vector3 bentToEnd = ( alongUpper * cosf( middleAngle ) + across * sinf( middleAngle ) ) * lower;
+	TriQuaternionRotationArc( &bend, &toEnd, &bentToEnd );
+
+	// Then swing the limb about the top so the end lands on the target
+	const Vector3 bentFromTop = middle + bentToEnd - top;
+	const Vector3 targetFromTop = target - top;
+	TriQuaternionRotationArc( &swing, &bentFromTop, &targetFromTop );
+	return true;
+}
+
+// Writes a limb's new world rotations, its top's parent's given, into the pose as rotations relative to their parents:
+// top, middle and end each the parent of the next
+void SetLimb( cmf::SkeletonPose& pose, const Quaternion& parent, uint32_t top, uint32_t middle, uint32_t end, const Quaternion& topRotation, const Quaternion& middleRotation, const Quaternion& endRotation )
+{
+	pose.boneTransforms[top].rotation = XMQuaternionNormalize( XMQuaternionMultiply( topRotation, XMQuaternionConjugate( parent ) ) );
+	pose.boneTransforms[middle].rotation = XMQuaternionNormalize( XMQuaternionMultiply( middleRotation, XMQuaternionConjugate( topRotation ) ) );
+	pose.boneTransforms[end].rotation = XMQuaternionNormalize( XMQuaternionMultiply( endRotation, XMQuaternionConjugate( middleRotation ) ) );
 }
 }
 
@@ -255,6 +330,28 @@ void Tr2AnimationRetargeter::SetIkMaxFootTilt( float degrees )
 	m_lastPoseCurrent = false;
 }
 
+bool Tr2AnimationRetargeter::GetHandIkOn() const
+{
+	return m_handIkOn;
+}
+
+void Tr2AnimationRetargeter::SetHandIkOn( bool on )
+{
+	m_handIkOn = on;
+	m_lastPoseCurrent = false;
+}
+
+bool Tr2AnimationRetargeter::GetLookAtOn() const
+{
+	return m_lookAtOn;
+}
+
+void Tr2AnimationRetargeter::SetLookAtOn( bool on )
+{
+	m_lookAtOn = on;
+	m_lastPoseCurrent = false;
+}
+
 bool Tr2AnimationRetargeter::AddChain( const std::string& rig, const std::string& firstTarget, const std::string& lastTarget )
 {
 	Rig* found = FindRig( rig );
@@ -292,9 +389,7 @@ void Tr2AnimationRetargeter::ClearHelperDrivers()
 
 void Tr2AnimationRetargeter::AddLeg( const std::string& name, const std::string& hip, const std::string& knee, const std::string& ankle )
 {
-	auto existing = std::find_if( m_legs.begin(), m_legs.end(), [&]( const Leg& leg ) { return leg.name == name; } );
-	Leg& leg = existing != m_legs.end() ? *existing : m_legs.emplace_back();
-	leg.name = name;
+	Leg& leg = FindOrAdd( m_legs, name );
 	leg.hip = hip;
 	leg.knee = knee;
 	leg.ankle = ankle;
@@ -343,6 +438,100 @@ bool Tr2AnimationRetargeter::SetClipContacts( const std::string& name, const std
 	// Legs are looked up by name when binding
 	m_needsBind = true;
 	return true;
+}
+
+void Tr2AnimationRetargeter::AddArm( const std::string& name, const std::string& shoulder, const std::string& elbow, const std::string& wrist )
+{
+	Arm& arm = FindOrAdd( m_arms, name );
+	arm.shoulder = shoulder;
+	arm.elbow = elbow;
+	arm.wrist = wrist;
+	m_needsBind = true;
+}
+
+void Tr2AnimationRetargeter::ClearArms()
+{
+	m_arms.clear();
+	m_needsBind = true;
+}
+
+bool Tr2AnimationRetargeter::SetHandTarget( const std::string& name, const Vector3& position, float weight )
+{
+	for( Arm& arm : m_arms )
+	{
+		if( arm.name == name )
+		{
+			const bool finite = AllFinite( position );
+			arm.target = finite ? position : Vector3( 0.f, 0.f, 0.f );
+			arm.weight = finite ? Clamp01( weight ) : 0.f;
+			m_lastPoseCurrent = false;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool Tr2AnimationRetargeter::SetHandPole( const std::string& name, const Vector3& pole, bool on )
+{
+	for( Arm& arm : m_arms )
+	{
+		if( arm.name == name )
+		{
+			const bool finite = AllFinite( pole );
+			arm.pole = finite ? pole : Vector3( 0.f, 0.f, 0.f );
+			arm.poleOn = on && finite;
+			m_lastPoseCurrent = false;
+			return true;
+		}
+	}
+	return false;
+}
+
+void Tr2AnimationRetargeter::AddLookBone( const std::string& bone, float share )
+{
+	LookBone& look = FindOrAdd( m_lookBones, bone );
+	look.share = std::isfinite( share ) ? std::max( 0.f, share ) : 0.f;
+	m_needsBind = true;
+}
+
+void Tr2AnimationRetargeter::ClearLookBones()
+{
+	m_lookBones.clear();
+	m_needsBind = true;
+}
+
+bool Tr2AnimationRetargeter::SetLookTarget( const Vector3& position, float weight, float maxDegrees )
+{
+	const bool finite = AllFinite( position );
+	m_lookTarget = finite ? position : Vector3( 0.f, 0.f, 0.f );
+	m_lookWeight = finite ? Clamp01( weight ) : 0.f;
+	m_lookMaxAngle = XMConvertToRadians( std::isfinite( maxDegrees ) ? std::max( 0.f, std::min( 180.f, maxDegrees ) ) : 0.f );
+	m_lastPoseCurrent = false;
+	return !m_lookBones.empty();
+}
+
+bool Tr2AnimationRetargeter::SetClipEvents( const std::string& name, const std::vector<std::pair<float, std::string>>& events )
+{
+	Clip* clip = FindClip( name );
+	if( !clip )
+	{
+		return false;
+	}
+	clip->events.clear();
+	for( const auto& event : events )
+	{
+		// A looping clip's end is its start
+		clip->events.emplace_back( clip->looping ? Wrap01( event.first ) : Clamp01( event.first ), event.second );
+	}
+	std::stable_sort( clip->events.begin(), clip->events.end(), []( const auto& a, const auto& b ) { return a.first < b.first; } );
+	return true;
+}
+
+std::vector<std::pair<std::string, std::string>> Tr2AnimationRetargeter::GetFiredEvents()
+{
+	std::vector<std::pair<std::string, std::string>> fired;
+	fired.swap( m_firedEvents );
+	return fired;
 }
 
 void Tr2AnimationRetargeter::AddRig( const std::string& name, const std::string& bindPosePath, const std::string& rootBone )
@@ -426,6 +615,8 @@ void Tr2AnimationRetargeter::AddClip( const std::string& name, const std::string
 	clip->verticalMotion = true;
 	clip->boneWeightSettings.clear();
 	clip->contactSettings.clear();
+	clip->events.clear();
+	clip->eventsShowing = false;
 	LoadRes( clip->path, clip->res );
 }
 
@@ -654,6 +845,15 @@ void Tr2AnimationRetargeter::Unbind()
 		leg.pelvisBone = leg.hipBone = leg.kneeBone = leg.ankleBone = NO_BONE;
 	}
 	m_legsBound = false;
+	for( Arm& arm : m_arms )
+	{
+		arm.shoulderBone = arm.elbowBone = arm.wristBone = NO_BONE;
+	}
+	for( LookBone& look : m_lookBones )
+	{
+		look.bone = NO_BONE;
+	}
+	m_lookBound = false;
 	m_bound = false;
 	m_boundTargetBoneCount = 0;
 	m_groundCalibrated = false;
@@ -709,6 +909,7 @@ bool Tr2AnimationRetargeter::Bind( const cmf::Skeleton& target )
 	}
 
 	BindHelpersAndLegs( target, targetBind, targetBindWorld );
+	BindReach( target, targetBind, targetBindWorld );
 
 	for( uint32_t r = 0; r < m_rigs.size(); ++r )
 	{
@@ -1071,6 +1272,45 @@ void Tr2AnimationRetargeter::BindHelpersAndLegs( const cmf::Skeleton& target, co
 	}
 }
 
+void Tr2AnimationRetargeter::BindReach( const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld )
+{
+	for( Arm& arm : m_arms )
+	{
+		arm.shoulderBone = FindBone( target, arm.shoulder );
+		arm.elbowBone = FindBone( target, arm.elbow );
+		arm.wristBone = FindBone( target, arm.wrist );
+		const bool chain = arm.shoulderBone != NO_BONE && arm.elbowBone != NO_BONE && arm.wristBone != NO_BONE &&
+			target.parents[arm.elbowBone] == arm.shoulderBone && target.parents[arm.wristBone] == arm.elbowBone;
+		if( !chain )
+		{
+			CCP_LOGWARN( "Tr2AnimationRetargeter: arm %s needs %s, %s and %s in the skeleton, each the parent of the next", arm.name.c_str(), arm.shoulder.c_str(), arm.elbow.c_str(), arm.wrist.c_str() );
+			arm.shoulderBone = arm.elbowBone = arm.wristBone = NO_BONE;
+		}
+	}
+
+	m_lookBound = false;
+	if( m_lookBones.empty() )
+	{
+		return;
+	}
+	bool chain = true;
+	for( size_t k = 0; k < m_lookBones.size() && chain; ++k )
+	{
+		LookBone& look = m_lookBones[k];
+		look.bone = FindBone( target, look.name );
+		chain = look.bone != NO_BONE && ( k == 0 || IsAncestor( target, m_lookBones[k - 1].bone, look.bone ) );
+	}
+	const uint32_t headBind = FindBone( targetBind, m_lookBones.back().name );
+	if( !chain || headBind == NO_BONE )
+	{
+		CCP_LOGWARN( "Tr2AnimationRetargeter: the look bones need to be in the skeleton, each above the next, and the last in the target bind pose" );
+		return;
+	}
+	// The head's forward: where the model's +Z points in the target bind pose, in the head's frame
+	m_lookForward = XMVector3InverseRotate( Vector3( 0.f, 0.f, 1.f ), targetBindWorld[headBind].rotation );
+	m_lookBound = true;
+}
+
 bool Tr2AnimationRetargeter::IsPlayable( const Clip& clip ) const
 {
 	return clip.rigIndex >= 0 && m_rigs[clip.rigIndex].bound && clip.player;
@@ -1185,17 +1425,22 @@ void Tr2AnimationRetargeter::DriveHelpers( const Rig& rig, cmf::SkeletonPose& ou
 		{
 			continue;
 		}
-		// The driver's turn from its bind pose, split in its own frame into a twist about its axis and a swing
-		const Quaternion turn = Hamilton( XMQuaternionConjugate( driver.driverRest ), out.boneTransforms[driver.driverBone].rotation );
-		Quaternion swing, twist;
-		SwingTwist( turn, driver.driverAxis, swing, twist );
-		float angle = 2.f * atan2f( Dot( Vector3( twist.x, twist.y, twist.z ), driver.driverAxis ), twist.w );
-		angle = angle > XM_PI ? angle - XM_2PI : ( angle < -XM_PI ? angle + XM_2PI : angle );
-		// The helper twists about its own axis by its share, and swings by its share of the swing seen from its frame
-		const Quaternion seenSwing = Hamilton( Hamilton( driver.toHelper, swing ), XMQuaternionConjugate( driver.toHelper ) );
-		const Quaternion helperTurn = Hamilton( Scaled( seenSwing, driver.swing ), XMQuaternionRotationNormal( driver.helperAxis, angle * driver.twist ) );
-		out.boneTransforms[driver.helperBone].rotation = XMQuaternionNormalize( Hamilton( driver.helperRest, helperTurn ) );
+		DriveHelper( driver, out );
 	}
+}
+
+void Tr2AnimationRetargeter::DriveHelper( const HelperDriver& driver, cmf::SkeletonPose& out )
+{
+	// The driver's turn from its bind pose, split in its own frame into a twist about its axis and a swing
+	const Quaternion turn = Hamilton( XMQuaternionConjugate( driver.driverRest ), out.boneTransforms[driver.driverBone].rotation );
+	Quaternion swing, twist;
+	SwingTwist( turn, driver.driverAxis, swing, twist );
+	float angle = 2.f * atan2f( Dot( Vector3( twist.x, twist.y, twist.z ), driver.driverAxis ), twist.w );
+	angle = angle > XM_PI ? angle - XM_2PI : ( angle < -XM_PI ? angle + XM_2PI : angle );
+	// The helper twists about its own axis by its share, and swings by its share of the swing seen from its frame
+	const Quaternion seenSwing = Hamilton( Hamilton( driver.toHelper, swing ), XMQuaternionConjugate( driver.toHelper ) );
+	const Quaternion helperTurn = Hamilton( Scaled( seenSwing, driver.swing ), XMQuaternionRotationNormal( driver.helperAxis, angle * driver.twist ) );
+	out.boneTransforms[driver.helperBone].rotation = XMQuaternionNormalize( Hamilton( driver.helperRest, helperTurn ) );
 }
 
 float Tr2AnimationRetargeter::Planted( uint32_t leg ) const
@@ -1298,53 +1543,218 @@ void Tr2AnimationRetargeter::StandOnGround( const cmf::Skeleton& skeleton, cmf::
 		const cmf::Transform& hipWorld = m_ikWorld[leg.hipBone];
 		const cmf::Transform& kneeWorld = m_ikWorld[leg.kneeBone];
 		const cmf::Transform& ankleWorld = m_ikWorld[leg.ankleBone];
-		const Vector3 hip = hipWorld.position;
-		const Vector3 knee = kneeWorld.position;
-		const Vector3 ankle = ankleWorld.position;
-		const Vector3 target = ankle + Vector3( 0.f, raise, 0.f );
-		const float thigh = Length( knee - hip );
-		const float shin = Length( ankle - knee );
-		if( thigh < 1e-4f || shin < 1e-4f )
+		const Vector3 target = ankleWorld.position + Vector3( 0.f, raise, 0.f );
+		// A straight leg bends the way knees do, its foot going back
+		Quaternion bend, swing;
+		if( !SolveTwoBone( hipWorld.position, kneeWorld.position, ankleWorld.position, target, Vector3( 0.f, 0.f, -1.f ), bend, swing ) )
 		{
 			continue;
 		}
-		const float reach = std::max( fabsf( thigh - shin ) + 1e-4f, std::min( thigh + shin - 1e-4f, Length( target - hip ) ) );
-
-		// Bend the knee to the angle that puts the ankle that far from the hip, in the plane the leg bends in now (a
-		// straight leg bends the way knees do, its foot going back)
-		const Vector3 toAnkle = ankle - knee;
-		const Vector3 alongThigh = ( hip - knee ) / thigh;
-		Vector3 across = toAnkle - alongThigh * Dot( toAnkle, alongThigh );
-		if( Length( across ) < 1e-5f )
-		{
-			const Vector3 back( 0.f, 0.f, -1.f );
-			across = back - alongThigh * Dot( back, alongThigh );
-		}
-		if( Length( across ) < 1e-5f )
-		{
-			continue;
-		}
-		across = across / Length( across );
-		const float cosKnee = std::max( -1.f, std::min( 1.f, ( thigh * thigh + shin * shin - reach * reach ) / ( 2.f * thigh * shin ) ) );
-		const float kneeAngle = acosf( cosKnee );
-		const Vector3 bentToAnkle = ( alongThigh * cosf( kneeAngle ) + across * sinf( kneeAngle ) ) * shin;
-		Quaternion bend;
-		TriQuaternionRotationArc( &bend, &toAnkle, &bentToAnkle );
-
-		// Then swing the leg about the hip so the ankle lands on the target
-		const Vector3 bentFromHip = knee + bentToAnkle - hip;
-		const Vector3 targetFromHip = target - hip;
-		Quaternion swing;
-		TriQuaternionRotationArc( &swing, &bentFromHip, &targetFromHip );
 
 		// World rotations: the knee bends, the leg swings, the foot keeps how it was turned, tilted to the ground
 		const Quaternion hipRotation = XMQuaternionNormalize( XMQuaternionMultiply( hipWorld.rotation, swing ) );
 		const Quaternion kneeRotation = XMQuaternionNormalize( XMQuaternionMultiply( XMQuaternionMultiply( kneeWorld.rotation, bend ), swing ) );
 		const Quaternion ankleRotation = XMQuaternionNormalize( XMQuaternionMultiply( ankleWorld.rotation, tilt ) );
-		const Quaternion& pelvisRotation = m_ikWorld[leg.pelvisBone].rotation;
-		pose.boneTransforms[leg.hipBone].rotation = XMQuaternionNormalize( XMQuaternionMultiply( hipRotation, XMQuaternionConjugate( pelvisRotation ) ) );
-		pose.boneTransforms[leg.kneeBone].rotation = XMQuaternionNormalize( XMQuaternionMultiply( kneeRotation, XMQuaternionConjugate( hipRotation ) ) );
-		pose.boneTransforms[leg.ankleBone].rotation = XMQuaternionNormalize( XMQuaternionMultiply( ankleRotation, XMQuaternionConjugate( kneeRotation ) ) );
+		SetLimb( pose, m_ikWorld[leg.pelvisBone].rotation, leg.hipBone, leg.kneeBone, leg.ankleBone, hipRotation, kneeRotation, ankleRotation );
+		m_ikMoved.insert( m_ikMoved.end(), { leg.hipBone, leg.kneeBone, leg.ankleBone } );
+	}
+}
+
+bool Tr2AnimationRetargeter::HasTargets() const
+{
+	if( m_lookAtOn && m_lookWeight > 0.f && !m_lookBones.empty() )
+	{
+		return true;
+	}
+	if( m_handIkOn )
+	{
+		for( const Arm& arm : m_arms )
+		{
+			if( arm.weight > 0.f )
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void Tr2AnimationRetargeter::LookAtTarget( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose )
+{
+	if( !m_lookAtOn || !m_lookBound || m_lookWeight <= 0.f )
+	{
+		return;
+	}
+	ComputeWorld( skeleton, pose.boneTransforms.data(), m_ikWorld );
+	const uint32_t head = m_lookBones.back().bone;
+	// Where the clips have the head look: the limit is measured from there
+	const Vector3 was = XMVector3Rotate( m_lookForward, m_ikWorld[head].rotation );
+	float remaining = 0.f;
+	for( const LookBone& look : m_lookBones )
+	{
+		remaining += look.share;
+	}
+
+	// Each bone in turn, from the top, takes its share of the turn still to go, aimed from where the head has got to,
+	// so the last turns the head exactly onto it
+	for( size_t k = 0; k < m_lookBones.size(); ++k )
+	{
+		const LookBone& look = m_lookBones[k];
+		const Vector3 toTarget = m_lookTarget - m_ikWorld[head].position;
+		if( Length( toTarget ) < 1e-4f )
+		{
+			return;
+		}
+		// At the target, or as far towards it as the limit allows, the weight of the way there
+		Quaternion toward;
+		TriQuaternionRotationArc( &toward, &was, &toTarget );
+		const float angle = AngleOf( toward );
+		const float limit = angle > m_lookMaxAngle ? m_lookMaxAngle / angle : 1.f;
+		const Vector3 wanted = XMVector3Rotate( was, Scaled( toward, limit * m_lookWeight ) );
+
+		const Vector3 looking = XMVector3Rotate( m_lookForward, m_ikWorld[head].rotation );
+		Quaternion turn;
+		TriQuaternionRotationArc( &turn, &looking, &wanted );
+		const float share = k + 1 == m_lookBones.size() || remaining <= 0.f ? 1.f : std::min( 1.f, look.share / remaining );
+		remaining -= look.share;
+
+		const Quaternion rotation = XMQuaternionMultiply( m_ikWorld[look.bone].rotation, Scaled( turn, share ) );
+		const Quaternion parent = HasParent( skeleton, look.bone ) ? m_ikWorld[skeleton.parents[look.bone]].rotation : IdentityQuaternion();
+		pose.boneTransforms[look.bone].rotation = XMQuaternionNormalize( XMQuaternionMultiply( rotation, XMQuaternionConjugate( parent ) ) );
+		m_ikMoved.push_back( look.bone );
+		ComputeWorld( skeleton, pose.boneTransforms.data(), m_ikWorld, look.bone );
+	}
+}
+
+void Tr2AnimationRetargeter::ReachWithHands( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose )
+{
+	if( !m_handIkOn )
+	{
+		return;
+	}
+	bool worldCurrent = false;
+	for( const Arm& arm : m_arms )
+	{
+		if( arm.shoulderBone == NO_BONE || arm.weight <= 0.f )
+		{
+			continue;
+		}
+		if( !worldCurrent )
+		{
+			ComputeWorld( skeleton, pose.boneTransforms.data(), m_ikWorld );
+			worldCurrent = true;
+		}
+		const cmf::Transform& shoulderWorld = m_ikWorld[arm.shoulderBone];
+		const cmf::Transform& elbowWorld = m_ikWorld[arm.elbowBone];
+		const cmf::Transform& wristWorld = m_ikWorld[arm.wristBone];
+		const Vector3 shoulder = shoulderWorld.position;
+		// The wrist goes the weight of the way to the target from where the clips hold it; a straight arm bends the way
+		// elbows do, its hand going forward
+		const Vector3 target = wristWorld.position + ( arm.target - wristWorld.position ) * arm.weight;
+		Quaternion bend, swing;
+		if( !SolveTwoBone( shoulder, elbowWorld.position, wristWorld.position, target, Vector3( 0.f, 0.f, 1.f ), bend, swing ) )
+		{
+			continue;
+		}
+
+		// Then roll the arm about the line from the shoulder to the wrist, which leaves the wrist where it is, to bring
+		// the elbow round towards the pole
+		Quaternion roll = IdentityQuaternion();
+		const Vector3 line = target - shoulder;
+		if( arm.poleOn && Length( line ) > 1e-5f )
+		{
+			const Vector3 axis = line / Length( line );
+			const Vector3 toElbow = XMVector3Rotate( elbowWorld.position - shoulder, swing );
+			const Vector3 toPole = arm.pole - shoulder;
+			const Vector3 elbowOff = toElbow - axis * Dot( toElbow, axis );
+			const Vector3 poleOff = toPole - axis * Dot( toPole, axis );
+			if( Length( elbowOff ) > 1e-5f && Length( poleOff ) > 1e-5f )
+			{
+				const float angle = atan2f( Dot( Cross( elbowOff, poleOff ), axis ), Dot( elbowOff, poleOff ) );
+				roll = XMQuaternionRotationNormal( axis, angle * arm.weight );
+			}
+		}
+
+		// World rotations: the elbow bends, the arm swings and rolls, the hand keeps how it was turned
+		const Quaternion turn = XMQuaternionMultiply( swing, roll );
+		const Quaternion shoulderRotation = XMQuaternionNormalize( XMQuaternionMultiply( shoulderWorld.rotation, turn ) );
+		const Quaternion elbowRotation = XMQuaternionNormalize( XMQuaternionMultiply( XMQuaternionMultiply( elbowWorld.rotation, bend ), turn ) );
+		const Quaternion parent = HasParent( skeleton, arm.shoulderBone ) ? m_ikWorld[skeleton.parents[arm.shoulderBone]].rotation : IdentityQuaternion();
+		SetLimb( pose, parent, arm.shoulderBone, arm.elbowBone, arm.wristBone, shoulderRotation, elbowRotation, wristWorld.rotation );
+		m_ikMoved.insert( m_ikMoved.end(), { arm.shoulderBone, arm.elbowBone, arm.wristBone } );
+		// The next arm may hang below this one
+		ComputeWorld( skeleton, pose.boneTransforms.data(), m_ikWorld, arm.shoulderBone );
+	}
+}
+
+void Tr2AnimationRetargeter::RedriveHelpers( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose ) const
+{
+	if( !m_helperDriversOn || m_ikMoved.empty() )
+	{
+		return;
+	}
+	for( const HelperDriver& driver : m_helperDrivers )
+	{
+		if( driver.helperBone == NO_BONE || std::find( m_ikMoved.begin(), m_ikMoved.end(), driver.driverBone ) == m_ikMoved.end() )
+		{
+			continue;
+		}
+		// A helper with a moved bone below it would carry that bone away from where it was put
+		const bool above = std::any_of( m_ikMoved.begin(), m_ikMoved.end(), [&]( uint32_t moved ) { return IsAncestor( skeleton, driver.helperBone, moved ); } );
+		if( !above )
+		{
+			DriveHelper( driver, pose );
+		}
+	}
+}
+
+void Tr2AnimationRetargeter::FireEvents()
+{
+	for( Clip& clip : m_clips )
+	{
+		const bool showing = Clamp01( clip.weight ) > 0.f && IsPlayable( clip );
+		// A looping clip's phase as given, unwrapped, so a caller counting phases up past 1 says which way it went
+		const float phase = clip.looping ? ( std::isfinite( clip.phase ) ? clip.phase : 0.f ) : Clamp01( clip.phase );
+		// A clip that has just come into the pose starts from where it is
+		if( showing && clip.eventsShowing && !clip.events.empty() )
+		{
+			// How far it has played on since the last pose: up to a whole loop forward, or for a looping clip whose
+			// phase went down, the short way round, so a wrapped phase coming round the seam goes forward and a step
+			// back is not most of a loop forward
+			const float step = phase - clip.eventPhase;
+			float played = step;
+			if( clip.looping )
+			{
+				played = step > 0.f ? std::min( 1.f, step ) : ( Wrap01( step ) <= 0.5f ? Wrap01( step ) : 0.f );
+			}
+			if( played > 0.f )
+			{
+				// In the order it plays past them: from the first after where it was, round over the seam
+				const float was = clip.looping ? Wrap01( clip.eventPhase ) : clip.eventPhase;
+				const auto next = std::upper_bound( clip.events.begin(), clip.events.end(), was, []( float p, const auto& e ) { return p < e.first; } );
+				const size_t first = next - clip.events.begin();
+				for( size_t k = 0; k < clip.events.size(); ++k )
+				{
+					const auto& event = clip.events[( first + k ) % clip.events.size()];
+					// One where the clip was comes round again only after a whole loop
+					float ahead = event.first - was;
+					if( clip.looping )
+					{
+						ahead = Wrap01( ahead ) > 0.f ? Wrap01( ahead ) : 1.f;
+					}
+					if( ahead > 0.f && ahead <= played )
+					{
+						if( m_firedEvents.size() >= MAX_FIRED_EVENTS )
+						{
+							m_firedEvents.erase( m_firedEvents.begin() );
+						}
+						m_firedEvents.emplace_back( clip.name, event.second );
+					}
+				}
+			}
+		}
+		clip.eventsShowing = showing;
+		clip.eventPhase = phase;
 	}
 }
 
@@ -1496,16 +1906,16 @@ void Tr2AnimationRetargeter::Apply( const cmf::Skeleton& skeleton, cmf::Skeleton
 	{
 		total += Clamp01( clip.weight );
 	}
-	// Standing in the pose below with no clip showing, the feet may still need standing on the ground
-	if( total <= 0.f && !HasGroundToStandOn() )
-	{
-		return;
-	}
-	if( m_needsBind || m_boundTargetBoneCount != skeleton.bones.size() )
+	// Standing in the pose below with no clip showing, the feet may still need standing on the ground, and the head and
+	// hands turning to their targets
+	const bool posing = total > 0.f || HasGroundToStandOn() || HasTargets();
+	if( posing && ( m_needsBind || m_boundTargetBoneCount != skeleton.bones.size() ) )
 	{
 		Bind( skeleton );
 	}
-	if( !m_bound || pose.boneTransforms.size() != skeleton.bones.size() )
+	// Every pose made moves the events on, a clip not showing to start afresh when it next shows
+	FireEvents();
+	if( !posing || !m_bound || pose.boneTransforms.size() != skeleton.bones.size() )
 	{
 		return;
 	}
@@ -1560,5 +1970,11 @@ void Tr2AnimationRetargeter::Apply( const cmf::Skeleton& skeleton, cmf::Skeleton
 		cmf::BlendPoses( pose, pose, m_layerPose, m_blendWeights, 1.f );
 	}
 
+	// The head turns before the hands reach, as turning the spine moves the shoulders they reach from; then the helpers
+	// of the bones moved follow them
+	m_ikMoved.clear();
 	StandOnGround( skeleton, pose );
+	LookAtTarget( skeleton, pose );
+	ReachWithHands( skeleton, pose );
+	RedriveHelpers( skeleton, pose );
 }

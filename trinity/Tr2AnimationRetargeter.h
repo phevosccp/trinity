@@ -48,6 +48,19 @@ BLUE_DECLARE( Tr2AnimationRetargeter );
  * pelvis drops to let the lower foot reach, each leg bends to put its foot that much higher or lower than the clips
  * hold it, and a planted foot tilts to the ground's slope, planted as the clips' contacts say (SetClipContacts).
  *
+ * Arms (AddArm) put the hands on points.  Every frame the caller gives a hand a target in the model's space and a
+ * weight (SetHandTarget); the elbow bends and the shoulder turns for the wrist to go that share of the way there from
+ * where the clips hold it, or as far along the line to it as the arm reaches.  The hand keeps how the clips turn it, and
+ * the elbow bends towards a pole if one is given (SetHandPole).
+ *
+ * The look chain (AddLookBone), bones from the spine up to the head, turns the head to look at a point (SetLookTarget),
+ * each bone taking its share of the turn, up to a limit from where the clips hold the head.  The head's forward is
+ * where the model's +Z points in the target bind pose.  The feet stand first, then the head turns, then the hands reach
+ * from where the turned spine leaves the shoulders; last, the helper drivers turn the helpers of the bones these moved,
+ * even in a clip whose rig pairs them.
+ *
+ * Clips raise events (SetClipEvents) as they play past them, read back with GetFiredEvents.
+ *
  * Each of these stages, and the pelvis's sway, can be turned off to compare with and without.
  *
  * The last pose made can be read back, per bone, relative to its parent or in the model's space.  Evaluate makes one
@@ -83,6 +96,10 @@ public:
 	void SetIkMaxPelvisDrop( float metres );
 	float GetIkMaxFootTilt() const;
 	void SetIkMaxFootTilt( float degrees );
+	bool GetHandIkOn() const;
+	void SetHandIkOn( bool on );
+	bool GetLookAtOn() const;
+	void SetLookAtOn( bool on );
 
 	bool AddChain( const std::string& rig, const std::string& firstTarget, const std::string& lastTarget );
 	void AddHelperDriver( const std::string& helper, const std::string& driver, const Vector3& driverAxis, const Vector3& helperAxis, float twist, float swing );
@@ -91,6 +108,15 @@ public:
 	void ClearLegs();
 	bool SetLegGround( const std::string& name, float height, const Vector3& normal, float weight );
 	bool SetClipContacts( const std::string& clip, const std::string& leg, const std::vector<std::pair<float, float>>& contacts );
+	void AddArm( const std::string& name, const std::string& shoulder, const std::string& elbow, const std::string& wrist );
+	void ClearArms();
+	bool SetHandTarget( const std::string& name, const Vector3& position, float weight );
+	bool SetHandPole( const std::string& name, const Vector3& pole, bool on );
+	void AddLookBone( const std::string& bone, float share );
+	void ClearLookBones();
+	bool SetLookTarget( const Vector3& position, float weight, float maxDegrees );
+	bool SetClipEvents( const std::string& clip, const std::vector<std::pair<float, std::string>>& events );
+	std::vector<std::pair<std::string, std::string>> GetFiredEvents();
 
 	void AddRig( const std::string& name, const std::string& bindPosePath, const std::string& rootBone );
 	bool MapBone( const std::string& rig, const std::string& sourceBone, const std::string& targetBone );
@@ -180,6 +206,9 @@ private:
 		std::vector<std::pair<std::string, float>> boneWeightSettings;	// target bone, and how much it and everything below take
 		std::vector<std::pair<std::string, std::vector<std::pair<float, float>>>> contactSettings;	// leg, and when its foot is down
 		std::vector<std::vector<std::pair<float, float>>> legContacts;	// per leg, when its foot is down, as phases
+		std::vector<std::pair<float, std::string>> events;	// by phase, each raised as the clip plays past it
+		bool eventsShowing = false;	// the clip showed in the last pose made, at eventPhase
+		float eventPhase = 0.f;	// as given, unwrapped for a looping clip
 
 		int32_t rigIndex = -1;
 		const cmf::Skeleton* skeleton = nullptr;
@@ -230,6 +259,32 @@ private:
 		uint32_t ankleBone = NO_BONE;
 	};
 
+	// An arm whose hand is put on a point
+	struct Arm
+	{
+		std::string name;
+		std::string shoulder;
+		std::string elbow;
+		std::string wrist;
+		Vector3 target = Vector3( 0.f, 0.f, 0.f );	// where the wrist goes, in the model's space
+		float weight = 0.f;	// how far it goes there from where the clips hold it, 0 to 1
+		Vector3 pole = Vector3( 0.f, 0.f, 0.f );	// a point the elbow bends towards, in the model's space
+		bool poleOn = false;
+
+		uint32_t shoulderBone = NO_BONE;
+		uint32_t elbowBone = NO_BONE;
+		uint32_t wristBone = NO_BONE;
+	};
+
+	// A bone of the chain that turns the head to look, and its share of the turn
+	struct LookBone
+	{
+		std::string name;
+		float share = 0.f;
+
+		uint32_t bone = NO_BONE;
+	};
+
 	static uint32_t FindBone( const cmf::Skeleton& skeleton, const std::string& name );
 
 	Rig* FindRig( const std::string& name );
@@ -243,9 +298,16 @@ private:
 	void BindChains( Rig& rig, const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
 	void BindHelpersAndLegs( const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
 	void DriveHelpers( const Rig& rig, cmf::SkeletonPose& out ) const;
+	static void DriveHelper( const HelperDriver& driver, cmf::SkeletonPose& out );
+	void RedriveHelpers( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose ) const;
+	void BindReach( const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
 	void StandOnGround( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
 	float Planted( uint32_t leg ) const;
 	bool HasGroundToStandOn() const;
+	bool HasTargets() const;
+	void LookAtTarget( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
+	void ReachWithHands( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
+	void FireEvents();
 	void Unbind();
 	bool IsPlayable( const Clip& clip ) const;
 	void SampleSource( Clip& clip, float time );
@@ -270,6 +332,17 @@ private:
 	std::vector<HelperDriver> m_helperDrivers;
 	std::vector<Leg> m_legs;
 	bool m_legsBound = false;
+	bool m_handIkOn = true;
+	bool m_lookAtOn = true;
+	std::vector<Arm> m_arms;
+	std::vector<LookBone> m_lookBones;	// from the top of the chain down to the head
+	bool m_lookBound = false;
+	Vector3 m_lookForward = Vector3( 0.f, 0.f, 1.f );	// the head's forward, in its own frame
+	Vector3 m_lookTarget = Vector3( 0.f, 0.f, 0.f );	// in the model's space
+	float m_lookWeight = 0.f;
+	float m_lookMaxAngle = XM_PI;	// radians the head may turn from where the clips hold it
+	std::vector<std::pair<std::string, std::string>> m_firedEvents;	// clip and event, since last read
+	std::vector<uint32_t> m_ikMoved;	// the bones the feet, look and hands turned in the pose being made
 	std::vector<Quaternion> m_linkWorld;	// per link of the rig being retargeted, the world rotation its target bone takes
 	std::vector<cmf::Transform> m_ikWorld;
 

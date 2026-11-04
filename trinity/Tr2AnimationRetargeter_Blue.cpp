@@ -34,6 +34,8 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 		MAP_PROPERTY( "footIkOn", GetFootIkOn, SetFootIkOn, "Whether legs stand the feet on the ground the caller gives (on until set)" )
 		MAP_PROPERTY( "ikMaxPelvisDrop", GetIkMaxPelvisDrop, SetIkMaxPelvisDrop, "m the pelvis may drop for a foot to reach lower ground (0.3 until set)" )
 		MAP_PROPERTY( "ikMaxFootTilt", GetIkMaxFootTilt, SetIkMaxFootTilt, "Degrees a planted foot may tilt to the ground's slope (30 until set)" )
+		MAP_PROPERTY( "handIkOn", GetHandIkOn, SetHandIkOn, "Whether arms put the hands on their targets (on until set)" )
+		MAP_PROPERTY( "lookAtOn", GetLookAtOn, SetLookAtOn, "Whether the look chain turns the head to its target (on until set)" )
 
 		MAP_METHOD_AND_WRAP(
 			"AddChain",
@@ -96,6 +98,86 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 			":param name: clip name\n"
 			":param leg: leg name\n"
 			":param contacts: list of (start, end) phases" )
+
+		MAP_METHOD_AND_WRAP(
+			"AddArm",
+			AddArm,
+			"AddArm( name, shoulder, elbow, wrist )\n\n"
+			"Adds an arm whose hand can be put on a point, or replaces the one with that name: each bone the parent of the\n"
+			"next.\n"
+			":param name: name to give its target by\n"
+			":param shoulder: upper arm bone name\n"
+			":param elbow: forearm bone name\n"
+			":param wrist: hand bone name" )
+
+		MAP_METHOD_AND_WRAP( "ClearArms", ClearArms, "Removes all arms" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetHandTarget",
+			SetHandTarget,
+			"SetHandTarget( name, position, weight )\n\n"
+			"Gives an arm's hand a point to reach, every frame: the elbow bends and the shoulder turns for the wrist to go\n"
+			"weight of the way there from where the clips hold it, or as far along the line to it as the arm reaches.  The\n"
+			"hand keeps how the clips turn it, and helper drivers turn the arm's helpers with it.  Hands reach after the\n"
+			"feet stand and the head turns.  Returns False if there is no such arm.\n"
+			":param name: arm name\n"
+			":param position: (x, y, z) for the wrist, in the model's space\n"
+			":param weight: how far it goes, 0 to 1: 0 leaves the arm as the clips hold it" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetHandPole",
+			SetHandPole,
+			"SetHandPole( name, pole, on )\n\n"
+			"Gives an arm a point its elbow bends towards: the arm rolls about the line from the shoulder to the wrist to\n"
+			"bring the elbow round to the pole's side.  Off, the elbow bends in the plane the clips bend it in.  Returns False\n"
+			"if there is no such arm.\n"
+			":param name: arm name\n"
+			":param pole: (x, y, z), in the model's space\n"
+			":param on: whether the elbow bends towards it" )
+
+		MAP_METHOD_AND_WRAP(
+			"AddLookBone",
+			AddLookBone,
+			"AddLookBone( bone, share )\n\n"
+			"Adds a bone to the bottom of the chain that turns the head to look, or sets the share of one in it already.\n"
+			"Each bone must be above the next; the last is the head, whose forward is where the model's +Z points in the\n"
+			"target bind pose.  The bones turn in order from the top, each by its share of the turn still to go, so shares\n"
+			"that sum to 1 are each bone's part of the whole; the head takes whatever is left.\n"
+			":param bone: bone name\n"
+			":param share: its part of the turn, 0 or more" )
+
+		MAP_METHOD_AND_WRAP( "ClearLookBones", ClearLookBones, "Removes all look bones" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetLookTarget",
+			SetLookTarget,
+			"SetLookTarget( position, weight, maxDegrees )\n\n"
+			"Gives the head a point to look at, every frame: the look bones turn the head's forward towards it, up to\n"
+			"maxDegrees from where the clips have it look, weight of the way.  Returns False if there are no look bones.\n"
+			":param position: (x, y, z), in the model's space\n"
+			":param weight: how far it turns, 0 to 1: 0 leaves the head as the clips hold it\n"
+			":param maxDegrees: the most the head turns, 0 to 180" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetClipEvents",
+			SetClipEvents,
+			"SetClipEvents( name, events )\n\n"
+			"Sets the events a clip raises as it plays past them, read back with GetFiredEvents.  Each pose made raises\n"
+			"those its showing clips have passed since the last, in the order passed.  A phase that goes up has gone\n"
+			"forward, up to a whole loop; a looping clip's phase that goes down has come round over the seam if that is\n"
+			"the short way round, and otherwise gone back, which raises none.  So a looping clip stepping more than half\n"
+			"of itself a pose needs its phase counted up past 1 rather than wrapped.  A clip that has just come into the\n"
+			"pose raises none until it moves on, so an event at the very start of a clip that does not loop never fires.\n"
+			"Returns False if there is no such clip.\n"
+			":param name: clip name\n"
+			":param events: list of (phase, name), phase 0 to 1 through the clip" )
+
+		MAP_METHOD_AND_WRAP(
+			"GetFiredEvents",
+			GetFiredEvents,
+			"GetFiredEvents()\n\n"
+			"The events raised since this was last called, as (clip, event) in the order raised; the oldest are dropped past\n"
+			"256 unread." )
 
 		MAP_METHOD_AND_WRAP(
 			"AddRig",
