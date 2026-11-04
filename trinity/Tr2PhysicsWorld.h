@@ -9,7 +9,7 @@
 
 namespace JPH
 {
-class BodyID;
+class ShapeSettings;
 }
 
 BLUE_DECLARE( Tr2PhysicsWorld );
@@ -22,13 +22,17 @@ BLUE_DECLARE( Tr2PhysicsWorld );
  * Everything is in one frame of reference the caller chooses (a ball's, say), in metres, with +Y up as gravity's
  * default says.  Positions are single precision, so keep them within a few kilometres of the frame's origin.
  *
- * Bodies resting on each other may sink in by up to 5 mm (Jolt's penetration slop, its default of 2 cm tightened).
- *
- * Bodies are boxes, each static (never moves), kinematic (moved by the caller, pushes what it meets) or dynamic
- * (moved by the simulation), named by the id AddBox gives, never 0.  Rotations are (x, y, z, w).
+ * Bodies are boxes and capsules, named by the id their Add gives, never 0.  Each is:
+ * - static: never moves;
+ * - kinematic: moved by the caller (MoveKinematic), pushing dynamic bodies it meets and pushed by nothing;
+ * - dynamic: moved by the simulation;
+ * - upright: dynamic, but never turns: it slides, falls and stacks keeping the turn it was made with.
+ * A kinematic body and a dynamic (or upright) one may be switched between the two (SetMotion).  Rotations are
+ * (x, y, z, w).  Bodies resting on each other may sink in by up to 5 mm (Jolt's penetration slop, its default of 2 cm
+ * tightened); every body has a friction of 0.6, no bounce, and Jolt's damping of 0.05/s.
  *
  * If Trinity was built with other Jolt settings than its Jolt library (which Jolt would answer with std::abort), the
- * world is not available: it logs an error once, AddBox gives 0 and Step does nothing.
+ * world is not available: it logs an error once, the Adds give 0 and Step does nothing.
  */
 BLUE_CLASS( Tr2PhysicsWorld ) :
 	public IRoot
@@ -41,6 +45,7 @@ public:
 		MOTION_STATIC = 0,
 		MOTION_KINEMATIC = 1,
 		MOTION_DYNAMIC = 2,
+		MOTION_UPRIGHT = 3,
 	};
 
 	Tr2PhysicsWorld( IRoot* lockobj = nullptr );
@@ -52,21 +57,33 @@ public:
 	int GetBodyCount() const;
 
 	int AddBox( const Vector3& halfExtents, const Vector3& position, const Quaternion& rotation, int motion, float mass );
+	int AddCapsule( float halfHeight, float radius, const Vector3& position, const Quaternion& rotation, int motion, float mass );
 	bool RemoveBody( int id );
 	bool HasBody( int id ) const;
 	void Clear();
 
+	int GetMotion( int id ) const;
+	bool SetMotion( int id, int motion );
+
 	std::pair<Vector3, Quaternion> GetTransform( int id ) const;
+	bool SetTransform( int id, const Vector3& position, const Quaternion& rotation );
+	bool MoveKinematic( int id, const Vector3& position, const Quaternion& rotation, float seconds );
 	Vector3 GetLinearVelocity( int id ) const;
 	bool SetLinearVelocity( int id, const Vector3& velocity );
+	Vector3 GetAngularVelocity( int id ) const;
+	bool SetAngularVelocity( int id, const Vector3& velocity );
 	bool IsSleeping( int id ) const;
 
 	bool Step( float seconds );
 
 private:
-	const JPH::BodyID* Find( int id ) const;	// none without a simulation, or for an id it has no body for
-
+	struct Body;
 	struct Simulation;	// none if Jolt could not be set up
+
+	int AddBody( const JPH::ShapeSettings& shape, const Vector3& position, const Quaternion& rotation, int motion, float mass );
+	const Body* Find( int id ) const;	// none without a simulation, or for an id it has no body for
+	const Body* FindMoving( int id ) const;	// as Find, and none for a static body
+
 	std::unique_ptr<Simulation> m_simulation;
 };
 
