@@ -38,6 +38,10 @@ BLUE_DECLARE( Tr2AnimationRetargeter );
  * A rig's chains (AddChain) share the turn of their paired ends out over the bones between them that the rig does not
  * pair, by length: a three-bone source spine bends all five bones of the target's.
  *
+ * A rig's bone turns (SetRigBoneTurn) turn a target bone and everything below it in each of the rig's clips, about an
+ * axis in the model's space, after retargeting: clips made on a slimmer body than the character's hold its arms and
+ * legs too close in.
+ *
  * Helper drivers (AddHelperDriver) turn helper bones, the twist and corrective joints that skin the body, with the
  * bones that drive them on the character's own rig: a twist by a share of the driver's twist about an axis, and a
  * swing by a share of the rest of its turn.  They act on each clip whose rig does not pair the helper, so clips made on the character's own skeleton
@@ -50,7 +54,8 @@ BLUE_DECLARE( Tr2AnimationRetargeter );
  *
  * Arms (AddArm) put the hands on points.  Every frame the caller gives a hand a target in the model's space and a
  * weight (SetHandTarget); the elbow bends and the shoulder turns for the wrist to go that share of the way there from
- * where the clips hold it, or as far along the line to it as the arm reaches.  The hand keeps how the clips turn it, and
+ * where the clips hold it, or as far along the line to it as the arm reaches.  The hand keeps how the clips turn it, or
+ * turns that share of the way to a turn given in the model's space (SetHandRotation), a palm laid on what it holds;
  * the elbow bends towards a pole if one is given (SetHandPole).
  *
  * The look chain (AddLookBone), bones from the spine up to the head, turns the head to look at a point (SetLookTarget),
@@ -112,6 +117,7 @@ public:
 	void ClearArms();
 	bool SetHandTarget( const std::string& name, const Vector3& position, float weight );
 	bool SetHandPole( const std::string& name, const Vector3& pole, bool on );
+	bool SetHandRotation( const std::string& name, const Quaternion& rotation, bool on );
 	void AddLookBone( const std::string& bone, float share );
 	void ClearLookBones();
 	bool SetLookTarget( const Vector3& position, float weight, float maxDegrees );
@@ -122,6 +128,7 @@ public:
 	bool MapBone( const std::string& rig, const std::string& sourceBone, const std::string& targetBone );
 	bool MapBoneFromBind( const std::string& rig, const std::string& sourceBone, const std::string& targetBone );
 	bool MapSameBones( const std::string& rig );
+	bool SetRigBoneTurn( const std::string& rig, const std::string& bone, const Vector3& axis, float degrees );
 	void ClearRigs();
 
 	void AddClip( const std::string& name, const std::string& path, bool looping, const std::string& rig, uint32_t layer );
@@ -166,6 +173,17 @@ private:
 		Quaternion toBindWorld;
 	};
 
+	// A turn a rig's clips give a target bone and everything below it, after retargeting: a clip made on a slimmer
+	// body holds the arms and legs closer in than the character is built for
+	struct BoneTurn
+	{
+		std::string bone;	// in the target skeleton
+		Vector3 axis;	// in the model's space, unit length
+		float radians = 0.f;
+
+		uint32_t targetBone = NO_BONE;
+	};
+
 	// A skeleton clips were made for: its bind pose, pelvis and bone pairs, and what is built from them while bound
 	struct Rig
 	{
@@ -176,6 +194,7 @@ private:
 		std::vector<BoneMapping> boneMap;
 		bool sameBones = false;	// also pair every bone of the animation's skeleton with the rig's of the same name
 		std::vector<std::pair<std::string, std::string>> chains;	// first and last target bone of each chain
+		std::vector<BoneTurn> turns;
 
 		bool bound = false;
 		std::vector<ChainJoint> chainJoints;
@@ -183,6 +202,7 @@ private:
 		std::vector<std::string> linkSources;	// per link, the source bone, found in each clip's skeleton
 		std::vector<Quaternion> offsets;	// per link: takes the source bone's animated world rotation to the target bone's
 		std::vector<int32_t> linkForTargetBone;	// index into the links, -1 for bones this rig leaves alone
+		std::vector<uint32_t> linkTargets;	// per link, its target bone
 		std::vector<uint32_t> feet;	// target bones that touch the ground
 		uint32_t pelvisTarget = NO_BONE;
 		uint32_t pelvisLink = 0;
@@ -270,6 +290,8 @@ private:
 		float weight = 0.f;	// how far it goes there from where the clips hold it, 0 to 1
 		Vector3 pole = Vector3( 0.f, 0.f, 0.f );	// a point the elbow bends towards, in the model's space
 		bool poleOn = false;
+		Quaternion rotation = Quaternion( 0.f, 0.f, 0.f, 1.f );	// the hand's turn, in the model's space
+		bool rotationOn = false;
 
 		uint32_t shoulderBone = NO_BONE;
 		uint32_t elbowBone = NO_BONE;
@@ -343,6 +365,7 @@ private:
 	float m_lookMaxAngle = XM_PI;	// radians the head may turn from where the clips hold it
 	std::vector<std::pair<std::string, std::string>> m_firedEvents;	// clip and event, since last read
 	std::vector<uint32_t> m_ikMoved;	// the bones the feet, look and hands turned in the pose being made
+	std::vector<Quaternion> m_turnForBone;	// per target bone, the rig's turns of it and the bones above it, in the model's space
 	std::vector<Quaternion> m_linkWorld;	// per link of the rig being retargeted, the world rotation its target bone takes
 	std::vector<cmf::Transform> m_ikWorld;
 

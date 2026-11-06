@@ -136,6 +136,17 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 			":param on: whether the elbow bends towards it" )
 
 		MAP_METHOD_AND_WRAP(
+			"SetHandRotation",
+			SetHandRotation,
+			"SetHandRotation( name, rotation, on )\n\n"
+			"Gives an arm's hand a turn, every frame, in the model's space: the hand turns the arm's weight (SetHandTarget)\n"
+			"of the way there from how the clips turn it, as the wrist goes to its target, so a palm lies on what it holds.\n"
+			"Off, the hand keeps the clips' turn.  A turn of no length turns nothing.  Returns False if there is no such arm.\n"
+			":param name: arm name\n"
+			":param rotation: (x, y, z, w), the hand bone's turn in the model's space\n"
+			":param on: whether the hand takes it" )
+
+		MAP_METHOD_AND_WRAP(
 			"AddLookBone",
 			AddLookBone,
 			"AddLookBone( bone, share )\n\n"
@@ -217,6 +228,20 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 			"Pairs every bone of the animation's skeleton with the rig's bone of the same name, from the bind pose: for clips\n"
 			"made on the animation's own skeleton.  Returns False if there is no such rig.\n"
 			":param rig: rig name" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRigBoneTurn",
+			SetRigBoneTurn,
+			"SetRigBoneTurn( rig, bone, axis, degrees )\n\n"
+			"Turns a target bone and everything below it, in every clip of the rig, after retargeting: a clip made on a\n"
+			"slimmer body holds the arms and legs closer in than the character is built for.  The turn is about an axis in\n"
+			"the model's space, at the bone's joint; a turn of a bone below one already turned comes first, so the thigh can\n"
+			"turn out and the ankle back, keeping the foot flat.  0 degrees takes it away.  Returns False if there is no\n"
+			"such rig, or the axis has no length.\n"
+			":param rig: rig name\n"
+			":param bone: target bone name\n"
+			":param axis: (x, y, z) to turn about, in the model's space\n"
+			":param degrees: how far, as geo2.QuaternionRotationAxis turns by that angle about the axis" )
 
 		MAP_METHOD_AND_WRAP( "ClearRigs", ClearRigs, "Removes all rigs and their bone pairs" )
 

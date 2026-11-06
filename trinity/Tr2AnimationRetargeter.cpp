@@ -487,6 +487,24 @@ bool Tr2AnimationRetargeter::SetHandPole( const std::string& name, const Vector3
 	return false;
 }
 
+bool Tr2AnimationRetargeter::SetHandRotation( const std::string& name, const Quaternion& rotation, bool on )
+{
+	for( Arm& arm : m_arms )
+	{
+		if( arm.name == name )
+		{
+			// A turn has a length: none, or one not finite, turns nothing
+			const float length = XMVectorGetX( XMQuaternionLength( rotation ) );
+			const bool usable = std::isfinite( length ) && length > 1e-6f;
+			arm.rotation = usable ? Quaternion( XMQuaternionNormalize( rotation ) ) : IdentityQuaternion();
+			arm.rotationOn = on && usable;
+			m_lastPoseCurrent = false;
+			return true;
+		}
+	}
+	return false;
+}
+
 void Tr2AnimationRetargeter::AddLookBone( const std::string& bone, float share )
 {
 	LookBone& look = FindOrAdd( m_lookBones, bone );
@@ -547,6 +565,7 @@ void Tr2AnimationRetargeter::AddRig( const std::string& name, const std::string&
 	rig->boneMap.clear();
 	rig->sameBones = false;
 	rig->chains.clear();
+	rig->turns.clear();
 	rig->bindPosePath = bindPosePath;
 	LoadRes( rig->bindPosePath, rig->bindPoseRes );
 }
@@ -584,6 +603,28 @@ bool Tr2AnimationRetargeter::MapSameBones( const std::string& rig )
 	}
 	found->sameBones = true;
 	m_needsBind = true;
+	return true;
+}
+
+bool Tr2AnimationRetargeter::SetRigBoneTurn( const std::string& rig, const std::string& bone, const Vector3& axis, float degrees )
+{
+	Rig* found = FindRig( rig );
+	const float length = Length( axis );
+	if( !found || !std::isfinite( degrees ) || !AllFinite( axis ) || length < 1e-6f )
+	{
+		return false;
+	}
+	auto it = std::find_if( found->turns.begin(), found->turns.end(), [&]( const BoneTurn& turn ) { return turn.bone == bone; } );
+	if( it == found->turns.end() )
+	{
+		// A bone not turned before is found in the skeleton at the next bind
+		found->turns.push_back( BoneTurn{ bone } );
+		it = found->turns.end() - 1;
+		m_needsBind = true;
+	}
+	it->axis = axis / length;
+	it->radians = XMConvertToRadians( degrees );
+	m_lastPoseCurrent = false;
 	return true;
 }
 
@@ -831,6 +872,11 @@ void Tr2AnimationRetargeter::Unbind()
 		rig.linkSources.clear();
 		rig.offsets.clear();
 		rig.linkForTargetBone.clear();
+		rig.linkTargets.clear();
+		for( BoneTurn& turn : rig.turns )
+		{
+			turn.targetBone = NO_BONE;
+		}
 		rig.feet.clear();
 		rig.pelvisTarget = NO_BONE;
 		rig.chainJoints.clear();
@@ -1097,8 +1143,14 @@ bool Tr2AnimationRetargeter::BindRig( uint32_t rigIndex, const cmf::Skeleton& ta
 		const Quaternion sourceBindRotation = sourceBindWorld[resolved[i].sourceBind].rotation;
 		const Quaternion offset = XMQuaternionNormalize( XMQuaternionMultiply( XMQuaternionMultiply( targetBindRotation, correction[i] ), XMQuaternionConjugate( sourceBindRotation ) ) );
 		rig.linkForTargetBone[resolved[i].target] = (int32_t)rig.offsets.size();
+		rig.linkTargets.push_back( resolved[i].target );
 		rig.offsets.push_back( offset );
 		rig.linkSources.push_back( *resolved[i].sourceName );
+	}
+
+	for( BoneTurn& turn : rig.turns )
+	{
+		turn.targetBone = FindBone( target, turn.bone );
 	}
 
 	BindChains( rig, target, targetBind, targetBindWorld );
@@ -1362,6 +1414,27 @@ void Tr2AnimationRetargeter::Retarget( Clip& clip, float phase, const cmf::Skele
 	for( size_t link = 0; link < rig.offsets.size(); ++link )
 	{
 		m_linkWorld[link] = XMQuaternionNormalize( XMQuaternionMultiply( rig.offsets[link], clip.sourceWorld[clip.sourceBones[link]].rotation ) );
+	}
+	if( !rig.turns.empty() )
+	{
+		// Each bone's own turn, then those of the turned bones above it, so a limb turns about its top joint as one
+		m_turnForBone.assign( skeleton.bones.size(), IdentityQuaternion() );
+		for( uint32_t i = 0; i < skeleton.bones.size(); ++i )
+		{
+			Quaternion own = IdentityQuaternion();
+			for( const BoneTurn& turn : rig.turns )
+			{
+				if( turn.targetBone == i && turn.radians != 0.f )
+				{
+					own = XMQuaternionMultiply( own, XMQuaternionRotationNormal( turn.axis, turn.radians ) );
+				}
+			}
+			m_turnForBone[i] = HasParent( skeleton, i ) ? Quaternion( XMQuaternionMultiply( own, m_turnForBone[skeleton.parents[i]] ) ) : own;
+		}
+		for( size_t link = 0; link < rig.linkTargets.size(); ++link )
+		{
+			m_linkWorld[link] = XMQuaternionNormalize( XMQuaternionMultiply( m_linkWorld[link], m_turnForBone[rig.linkTargets[link]] ) );
+		}
 	}
 	const bool chains = m_chainsOn && !rig.chainJoints.empty();
 
@@ -1675,12 +1748,14 @@ void Tr2AnimationRetargeter::ReachWithHands( const cmf::Skeleton& skeleton, cmf:
 			}
 		}
 
-		// World rotations: the elbow bends, the arm swings and rolls, the hand keeps how it was turned
+		// World rotations: the elbow bends, the arm swings and rolls, the hand keeps how it was turned, or turns the
+		// weight of the way to the turn it was given
 		const Quaternion turn = XMQuaternionMultiply( swing, roll );
 		const Quaternion shoulderRotation = XMQuaternionNormalize( XMQuaternionMultiply( shoulderWorld.rotation, turn ) );
 		const Quaternion elbowRotation = XMQuaternionNormalize( XMQuaternionMultiply( XMQuaternionMultiply( elbowWorld.rotation, bend ), turn ) );
+		const Quaternion handRotation = arm.rotationOn ? Quaternion( XMQuaternionNormalize( XMQuaternionSlerp( wristWorld.rotation, arm.rotation, arm.weight ) ) ) : wristWorld.rotation;
 		const Quaternion parent = HasParent( skeleton, arm.shoulderBone ) ? m_ikWorld[skeleton.parents[arm.shoulderBone]].rotation : IdentityQuaternion();
-		SetLimb( pose, parent, arm.shoulderBone, arm.elbowBone, arm.wristBone, shoulderRotation, elbowRotation, wristWorld.rotation );
+		SetLimb( pose, parent, arm.shoulderBone, arm.elbowBone, arm.wristBone, shoulderRotation, elbowRotation, handRotation );
 		m_ikMoved.insert( m_ikMoved.end(), { arm.shoulderBone, arm.elbowBone, arm.wristBone } );
 		// The next arm may hang below this one
 		ComputeWorld( skeleton, pose.boneTransforms.data(), m_ikWorld, arm.shoulderBone );
