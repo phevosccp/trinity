@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 namespace JPH
 {
@@ -22,14 +23,19 @@ BLUE_DECLARE( Tr2PhysicsWorld );
  * Everything is in one frame of reference the caller chooses (a ball's, say), in metres, with +Y up as gravity's
  * default says.  Positions are single precision, so keep them within a few kilometres of the frame's origin.
  *
- * Bodies are boxes and capsules, named by the id their Add gives, never 0.  Each is:
+ * Bodies are boxes, capsules and convex hulls, named by the id their Add gives, never 0.  Each is:
  * - static: never moves;
  * - kinematic: moved by the caller (MoveKinematic), pushing dynamic bodies it meets and pushed by nothing;
  * - dynamic: moved by the simulation;
  * - upright: dynamic, but never turns: it slides, falls and stacks keeping the turn it was made with.
  * A kinematic body and a dynamic (or upright) one may be switched between the two (SetMotion).  Rotations are
  * (x, y, z, w).  Bodies resting on each other may sink in by up to 5 mm (Jolt's penetration slop, its default of 2 cm
- * tightened); every body has a friction of 0.6, no bounce, and Jolt's damping of 0.05/s.
+ * tightened); every body has a friction of 0.6, and starts with no bounce and Jolt's damping of 0.05/s, which a moving
+ * body may change (SetRestitution, SetDamping).  A moving body may also feel the gyroscopic force (SetGyroscopic), off
+ * until set: then a body turning about the middle one of its three axes flips over and back, as a T-handle does in
+ * orbit (the Dzhanibekov effect).
+ *
+ * CastRay finds the nearest body a segment meets.
  *
  * If Trinity was built with other Jolt settings than its Jolt library (which Jolt would answer with std::abort), the
  * world is not available: it logs an error once, the Adds give 0 and Step does nothing.
@@ -58,6 +64,7 @@ public:
 
 	int AddBox( const Vector3& halfExtents, const Vector3& position, const Quaternion& rotation, int motion, float mass );
 	int AddCapsule( float halfHeight, float radius, const Vector3& position, const Quaternion& rotation, int motion, float mass );
+	int AddConvexHull( const std::vector<Vector3>& points, const Vector3& position, const Quaternion& rotation, int motion, float mass );
 	bool RemoveBody( int id );
 	bool HasBody( int id ) const;
 	void Clear();
@@ -73,6 +80,17 @@ public:
 	Vector3 GetAngularVelocity( int id ) const;
 	bool SetAngularVelocity( int id, const Vector3& velocity );
 	bool IsSleeping( int id ) const;
+	bool AddImpulse( int id, const Vector3& impulse, const Vector3& point );
+
+	float GetRestitution( int id ) const;
+	bool SetRestitution( int id, float restitution );
+	std::pair<float, float> GetDamping( int id ) const;
+	bool SetDamping( int id, float linear, float angular );
+	bool GetGyroscopic( int id ) const;
+	bool SetGyroscopic( int id, bool on );
+
+	// ((id, distance), (point, normal)) of the nearest body the segment meets; id 0 for none
+	std::pair<std::pair<int, float>, std::pair<Vector3, Vector3>> CastRay( const Vector3& from, const Vector3& to ) const;
 
 	bool Step( float seconds );
 

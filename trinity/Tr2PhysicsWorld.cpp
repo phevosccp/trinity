@@ -1,19 +1,61 @@
 // Copyright © 2026 CCP ehf.
 
+// Jolt's inline functions as this file compiles them are the ones the linker keeps, its library's own calls to them
+// included (this file's objects come before the library).  MSVC 14.52 (Visual Studio 18 Insiders) miscompiles some of
+// them: bodies turned towards 90 degrees about x or z sink through what they rest on, as a Jolt built by it does.  So
+// with that compiler they are compiled unoptimised, as Jolt's library is built with VS 2022's 14.44; this file's own
+// code is optimised as ever, and so is the standard library's, included first.  It costs a little: a step of 50 boxes
+// falling into a pile took 0.101 ms median, against 0.095 ms with everything optimised (2026-11-06).  Retest this with
+// a released VS 18 compiler and narrow the condition if it builds Jolt right.
+#include <algorithm>
+#include <atomic>
+#include <cfloat>
+#include <climits>
+#include <cmath>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+#if defined( _MSC_VER ) && !defined( __clang__ ) && _MSC_VER >= 1950
+#define TRINITY_JOLT_HEADERS_UNOPTIMISED
+#pragma optimize( "", off )
+#endif
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemSingleThreaded.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/AllowedDOFs.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.h>
 #include <Jolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.h>
+#include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/ObjectLayerPairFilterTable.h>
+#include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
+#ifdef TRINITY_JOLT_HEADERS_UNOPTIMISED
+#pragma optimize( "", on )
+#endif
 
 #include "StdAfx.h"
 #include "Tr2PhysicsWorld.h"
@@ -42,6 +84,12 @@ constexpr float MAX_SPEED = 500.f;	// m/s a velocity set may have at most: Jolt'
 constexpr float MAX_TURN_RATE = 40.f;	// rad/s; Jolt caps turns at 15 turns a second (about 47 rad/s)
 constexpr float PENETRATION_SLOP = 0.005f;	// m bodies may rest sunk into each other; Jolt's 2 cm shows at a crate's scale
 constexpr float FRICTION = 0.6f;	// every body's: a crate on concrete stays put on a gentle slope
+constexpr size_t MIN_HULL_POINTS = 4;	// a hull needs a volume
+constexpr size_t MAX_HULL_POINTS = 1024;	// given; Jolt keeps at most 256 of them on the hull it makes
+constexpr float MIN_HULL_VOLUME = 1e-9f;	// m^3: a millimetre cube; flatter is a plane, which Jolt makes a hull of anyway
+constexpr float MAX_DAMPING = 100.f;	// 1/s
+constexpr float MAX_IMPULSE = 1e9f;	// N s; Jolt caps the velocity it gives (MAX_SPEED, MAX_TURN_RATE) whatever it is
+constexpr float MAX_RAY = 100000.f;	// m, a cast's length at most
 
 // Static bodies never meet each other; moving ones (kinematic and dynamic) meet everything
 constexpr JPH::ObjectLayer LAYER_STATIC = 0;
@@ -296,6 +344,34 @@ int Tr2PhysicsWorld::AddCapsule( float halfHeight, float radius, const Vector3& 
 	return AddBody( shape, position, rotation, motion, mass );
 }
 
+int Tr2PhysicsWorld::AddConvexHull( const std::vector<Vector3>& points, const Vector3& position, const Quaternion& rotation, int motion, float mass )
+{
+	TRINITY_STATS_ZONE( "Tr2PhysicsWorld::AddConvexHull" );
+
+	if( !m_simulation || points.size() < MIN_HULL_POINTS || points.size() > MAX_HULL_POINTS )
+	{
+		return 0;
+	}
+	JPH::Array<JPH::Vec3> corners;
+	corners.reserve( points.size() );
+	for( const Vector3& point : points )
+	{
+		if( !Within( point, MAX_HALF_EXTENT ) )
+		{
+			return 0;
+		}
+		corners.push_back( ToJolt( point ) );
+	}
+	// Jolt rounds the hull's edges by up to this, less on a hull too thin for it; the points stay its outside
+	JPH::ConvexHullShapeSettings shape( corners, JPH::cDefaultConvexRadius );
+	const JPH::ShapeSettings::ShapeResult made = shape.Create();	// kept by the settings, which AddBody makes it from
+	if( made.HasError() || !( made.Get()->GetVolume() > MIN_HULL_VOLUME ) )
+	{
+		return 0;	// points all in one place, on a line or in a plane
+	}
+	return AddBody( shape, position, rotation, motion, mass );
+}
+
 int Tr2PhysicsWorld::AddBody( const JPH::ShapeSettings& shapeSettings, const Vector3& position, const Quaternion& rotation, int motion, float mass )
 {
 	JPH::Quat turn;
@@ -333,8 +409,10 @@ int Tr2PhysicsWorld::AddBody( const JPH::ShapeSettings& shapeSettings, const Vec
 		return 0;
 	}
 
+	const int handle = m_simulation->nextId;
 	JPH::BodyCreationSettings settings( shape.Get(), ToJoltPosition( position ), turn, motionType, moving ? LAYER_MOVING : LAYER_STATIC );
 	settings.mFriction = FRICTION;
+	settings.mUserData = static_cast<JPH::uint64>( handle );	// CastRay names what it hits by it
 	if( moving )
 	{
 		// Kinematic and dynamic bodies may be switched between the two (SetMotion), so each has a mass
@@ -358,7 +436,7 @@ int Tr2PhysicsWorld::AddBody( const JPH::ShapeSettings& shapeSettings, const Vec
 		return 0;
 	}
 
-	const int handle = m_simulation->nextId++;
+	m_simulation->nextId++;
 	Body body;
 	body.id = id;
 	body.upright = motion == MOTION_UPRIGHT;
@@ -525,6 +603,141 @@ bool Tr2PhysicsWorld::IsSleeping( int id ) const
 {
 	const Body* body = Find( id );
 	return body && !m_simulation->system.GetBodyInterface().IsActive( body->id );
+}
+
+bool Tr2PhysicsWorld::AddImpulse( int id, const Vector3& impulse, const Vector3& point )
+{
+	const Body* body = Find( id );
+	if( !body || !Within( impulse, MAX_IMPULSE ) || !AllFinite( point ) )
+	{
+		return false;
+	}
+	JPH::BodyInterface& bodyInterface = m_simulation->system.GetBodyInterface();
+	if( bodyInterface.GetMotionType( body->id ) != JPH::EMotionType::Dynamic )
+	{
+		return false;	// only what the simulation moves takes a push; Jolt asserts on the rest
+	}
+	// Off its centre of mass it turns it too, about what its allowed freedoms leave (an upright body only slides)
+	bodyInterface.AddImpulse( body->id, ToJolt( impulse ), ToJoltPosition( point ) );
+	bodyInterface.ActivateBody( body->id );
+	return true;
+}
+
+float Tr2PhysicsWorld::GetRestitution( int id ) const
+{
+	const Body* body = Find( id );
+	return body ? m_simulation->system.GetBodyInterface().GetRestitution( body->id ) : 0.f;
+}
+
+bool Tr2PhysicsWorld::SetRestitution( int id, float restitution )
+{
+	const Body* body = Find( id );
+	if( !body || !std::isfinite( restitution ) || restitution < 0.f || restitution > 1.f )
+	{
+		return false;
+	}
+	// Two bodies meeting bounce by the larger of their two (Jolt's default), so a lively prop bounces off a dead wall
+	m_simulation->system.GetBodyInterface().SetRestitution( body->id, restitution );
+	return true;
+}
+
+std::pair<float, float> Tr2PhysicsWorld::GetDamping( int id ) const
+{
+	const Body* body = FindMoving( id );
+	if( !body )
+	{
+		return { 0.f, 0.f };
+	}
+	JPH::BodyLockRead lock( m_simulation->system.GetBodyLockInterface(), body->id );
+	if( !lock.Succeeded() )
+	{
+		return { 0.f, 0.f };
+	}
+	const JPH::MotionProperties* motion = lock.GetBody().GetMotionProperties();
+	return { motion->GetLinearDamping(), motion->GetAngularDamping() };
+}
+
+bool Tr2PhysicsWorld::SetDamping( int id, float linear, float angular )
+{
+	const Body* body = FindMoving( id );
+	if( !body || !std::isfinite( linear ) || !std::isfinite( angular ) || linear < 0.f || angular < 0.f || linear > MAX_DAMPING || angular > MAX_DAMPING )
+	{
+		return false;
+	}
+	JPH::BodyLockWrite lock( m_simulation->system.GetBodyLockInterface(), body->id );
+	if( !lock.Succeeded() )
+	{
+		return false;
+	}
+	JPH::MotionProperties* motion = lock.GetBody().GetMotionProperties();
+	motion->SetLinearDamping( linear );
+	motion->SetAngularDamping( angular );
+	return true;
+}
+
+bool Tr2PhysicsWorld::GetGyroscopic( int id ) const
+{
+	const Body* body = FindMoving( id );
+	if( !body )
+	{
+		return false;
+	}
+	JPH::BodyLockRead lock( m_simulation->system.GetBodyLockInterface(), body->id );
+	return lock.Succeeded() && lock.GetBody().GetApplyGyroscopicForce();
+}
+
+bool Tr2PhysicsWorld::SetGyroscopic( int id, bool on )
+{
+	const Body* body = FindMoving( id );
+	if( !body )
+	{
+		return false;
+	}
+	JPH::BodyLockWrite lock( m_simulation->system.GetBodyLockInterface(), body->id );
+	if( !lock.Succeeded() )
+	{
+		return false;
+	}
+	lock.GetBody().SetApplyGyroscopicForce( on );
+	return true;
+}
+
+std::pair<std::pair<int, float>, std::pair<Vector3, Vector3>> Tr2PhysicsWorld::CastRay( const Vector3& from, const Vector3& to ) const
+{
+	TRINITY_STATS_ZONE( "Tr2PhysicsWorld::CastRay" );
+
+	const std::pair<std::pair<int, float>, std::pair<Vector3, Vector3>> none = { { 0, 0.f }, { Vector3( 0.f, 0.f, 0.f ), Vector3( 0.f, 0.f, 0.f ) } };
+	if( !m_simulation || !AllFinite( from ) || !AllFinite( to ) )
+	{
+		return none;
+	}
+	const Vector3 along( to.x - from.x, to.y - from.y, to.z - from.z );
+	const float length = std::sqrt( along.x * along.x + along.y * along.y + along.z * along.z );
+	if( !( length > 1e-6f ) || length > MAX_RAY )
+	{
+		return none;
+	}
+	const JPH::RRayCast ray( ToJoltPosition( from ), ToJolt( along ) );
+	JPH::RayCastResult hit;
+	if( !m_simulation->system.GetNarrowPhaseQuery().CastRay( ray, hit ) )
+	{
+		return none;
+	}
+	JPH::BodyLockRead lock( m_simulation->system.GetBodyLockInterface(), hit.mBodyID );
+	if( !lock.Succeeded() )
+	{
+		return none;
+	}
+	const JPH::Body& body = lock.GetBody();
+	const int handle = static_cast<int>( body.GetUserData() );
+	if( !Find( handle ) )
+	{
+		return none;
+	}
+	const JPH::RVec3 point = ray.GetPointOnRay( hit.mFraction );
+	const JPH::Vec3 normal = body.GetWorldSpaceSurfaceNormal( hit.mSubShapeID2, point );
+	const Vector3 at( static_cast<float>( point.GetX() ), static_cast<float>( point.GetY() ), static_cast<float>( point.GetZ() ) );
+	return { { handle, hit.mFraction * length }, { at, FromJolt( normal ) } };
 }
 
 bool Tr2PhysicsWorld::Step( float seconds )

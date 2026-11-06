@@ -12,8 +12,9 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 		"A rigid-body simulation at a character's scale (Jolt Physics), in one frame of reference the caller chooses, in\n"
 		"metres.  Nothing runs until one is made; the caller steps it and reads its bodies back.  Rotations are (x, y, z, w).\n"
 		"Motions: 0 static, never moves; 1 kinematic, moved by the caller (MoveKinematic), pushing dynamic bodies it meets;\n"
-		"2 dynamic, moved by the simulation; 3 upright, dynamic but never turning.  Every body has a friction of 0.6 and\n"
-		"no bounce, and rests sunk into what it rests on by up to 5 mm." )
+		"2 dynamic, moved by the simulation; 3 upright, dynamic but never turning.  Every body has a friction of 0.6,\n"
+		"starts with no bounce (SetRestitution) and Jolt's damping (SetDamping), and rests sunk into what it rests on by\n"
+		"up to 5 mm." )
 		MAP_INTERFACE( Tr2PhysicsWorld )
 
 		MAP_PROPERTY_READONLY(
@@ -46,6 +47,19 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			":param halfHeight: m from its middle to the middle of each round end, 0 (a ball) to 1000\n"
 			":param radius: m, 0.001 to 1000\n"
 			":param position: (x, y, z) of its middle\n"
+			":param rotation: (x, y, z, w)\n"
+			":param motion: 0 static, 1 kinematic, 2 dynamic, 3 upright\n"
+			":param mass: as AddBox's" )
+
+		MAP_METHOD_AND_WRAP(
+			"AddConvexHull",
+			AddConvexHull,
+			"AddConvexHull( points, position, rotation, motion, mass )\n\n"
+			"Adds the convex hull round points, as AddBox adds a box, and returns its id; 0 also if the points are flat or\n"
+			"all in one place.  Its mass is spread through the hull, so an odd shape turns as its shape says.\n"
+			":param points: 4 to 1024 (x, y, z), in its own frame, each within 1000 m of its origin; the hull keeps at most\n"
+			"    256 of them, its edges rounded by up to 5 cm inside them\n"
+			":param position: (x, y, z) of its own frame's origin, which GetTransform gives back\n"
 			":param rotation: (x, y, z, w)\n"
 			":param motion: 0 static, 1 kinematic, 2 dynamic, 3 upright\n"
 			":param mass: as AddBox's" )
@@ -117,6 +131,56 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			"IsSleeping( id )\n\n"
 			"Whether a body is at rest and no longer simulated until something wakes it; static bodies always are.  False\n"
 			"if there is no body with that id" )
+
+		MAP_METHOD_AND_WRAP(
+			"AddImpulse",
+			AddImpulse,
+			"AddImpulse( id, impulse, point )\n\n"
+			"Pushes a dynamic or upright body by impulse, (x, y, z) N s, at point (x, y, z), waking it: its velocity changes\n"
+			"by impulse over its mass, and a push off its centre of mass turns it too (an upright body only slides).\n"
+			"Returns False for a body that is not dynamic or upright (kinematic now included), one not there, or bad\n"
+			"arguments" )
+
+		MAP_METHOD_AND_WRAP( "GetRestitution", GetRestitution, "GetRestitution( id )\n\nHow lively a body's bounce is, 0 to 1; 0 if it is not there" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRestitution",
+			SetRestitution,
+			"SetRestitution( id, restitution )\n\n"
+			"How lively a body bounces, 0 (dead, every body's at first) to 1 (keeping its speed).  Two bodies meeting bounce\n"
+			"by the larger of the two.  Returns False if it is not there or restitution is out of range" )
+
+		MAP_METHOD_AND_WRAP(
+			"GetDamping",
+			GetDamping,
+			"GetDamping( id )\n\n(linear, angular) 1/s a moving body's speed and turn die away at; (0, 0) for a static one or none" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetDamping",
+			SetDamping,
+			"SetDamping( id, linear, angular )\n\n"
+			"How fast a moving body's speed and turn die away, each 0 to 100 per second (0.05 at first); 0 keeps them for\n"
+			"good, as in space.  Returns False for a static body, one not there, or values out of range" )
+
+		MAP_METHOD_AND_WRAP(
+			"GetGyroscopic",
+			GetGyroscopic,
+			"GetGyroscopic( id )\n\nWhether a moving body feels the gyroscopic force; False for a static one or none" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetGyroscopic",
+			SetGyroscopic,
+			"SetGyroscopic( id, on )\n\n"
+			"Whether a moving body feels the gyroscopic force (off at first): on, one with three different axes spun about\n"
+			"its middle one flips over and back, as a T-handle does in orbit.  Returns False for a static body or none" )
+
+		MAP_METHOD_AND_WRAP(
+			"CastRay",
+			CastRay,
+			"CastRay( start, end )\n\n"
+			"The nearest body the segment from start to end (each (x, y, z), at most 100 km apart) meets:\n"
+			"((id, distance), (point, normal)), distance in m from start, normal the body's surface's there.  A body the\n"
+			"segment starts inside is met at start.  ((0, 0), ((0, 0, 0), (0, 0, 0))) if it meets none" )
 
 		MAP_METHOD_AND_WRAP(
 			"Step",
