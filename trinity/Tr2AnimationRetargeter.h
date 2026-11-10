@@ -73,6 +73,8 @@ BLUE_DECLARE( Tr2AnimationRetargeter );
  * bones of a ragdoll chain (AddRagdollChain) between two parts' bones share their turns as a rig's chain does, and
  * every other bone keeps its turn in its parent, so no bone stretches and fingers follow hands.  The world is stepped
  * by the caller before the pose is made, so the parts read are this frame's and the target is the next step's.
+ * Frozen (ragdollFrozen), the stage keeps to the parts as they were when frozen, and gives the ragdoll the blended pose
+ * as its target: to blend out of a body lying where it fell, its model put under it, back onto the clips.
  *
  * Clips raise events (SetClipEvents) as they play past them, read back with GetFiredEvents.
  *
@@ -143,6 +145,8 @@ public:
 	void SetRagdollWeight( float weight );
 	bool GetRagdollOn() const;
 	void SetRagdollOn( bool on );
+	bool GetRagdollFrozen() const;
+	void SetRagdollFrozen( bool frozen );
 
 	void AddRig( const std::string& name, const std::string& bindPosePath, const std::string& rootBone );
 	bool MapBone( const std::string& rig, const std::string& sourceBone, const std::string& targetBone );
@@ -374,6 +378,9 @@ private:
 	void BindRagdoll( const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
 	bool HasRagdoll() const;
 	void ApplyRagdoll( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
+	bool GiveRagdollTarget( const cmf::Skeleton& skeleton, const cmf::SkeletonPose& pose );
+	void ReRootPowered( const Vector3& rootTargetPosition, const Quaternion& rootTargetRotation );
+	void ApplyRagdollPose( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose, float weight );
 	void FireEvents();
 	void Unbind();
 	bool IsPlayable( const Clip& clip ) const;
@@ -424,6 +431,11 @@ private:
 	std::vector<Vector3> m_ragdollPositions;	// per part, in the world's frame: the target given, then the parts read
 	std::vector<Quaternion> m_ragdollRotations;
 	std::vector<char> m_ragdollDynamic;	// per part, whether the simulation moves it
+	std::vector<Vector3> m_ragdollTargetPositions;	// per part, in the world's frame: the target given
+	std::vector<Quaternion> m_ragdollTargetRotations;
+	bool m_ragdollFrozen = false;	// the stage takes the parts as they were when frozen, not as they are
+	std::vector<Vector3> m_ragdollFrozenPositions;	// per part, in the world's frame, as they were then
+	std::vector<Quaternion> m_ragdollFrozenRotations;
 	std::vector<Quaternion> m_ragdollBoneRotation;	// per target bone, the turn its part gives it, in the model's space
 	std::vector<char> m_ragdollTaken;	// per target bone, whether a part gave it one in the pose being made
 	std::vector<cmf::Transform> m_ragdollPose;	// per target bone, the ragdoll's whole pose in the model's space

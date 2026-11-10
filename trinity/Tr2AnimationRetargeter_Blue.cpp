@@ -367,6 +367,16 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 			"How much of the pose is the ragdoll's, 0 to 1 (0 until set), for the parts the simulation moves" )
 
 		MAP_PROPERTY( "ragdollOn", GetRagdollOn, SetRagdollOn, "Whether the ragdoll stage runs (on until set)" )
+
+		MAP_PROPERTY(
+			"ragdollFrozen",
+			GetRagdollFrozen,
+			SetRagdollFrozen,
+			"True: the stage takes the ragdoll's parts as they are now, in the world, and keeps to that whatever they do\n"
+			"after, as if every part were the simulation's; and the ragdoll's target is the pose drawn, blended, not the\n"
+			"clips'.  For blending out of a body lying where it fell: put the model under it (SetRagdollFrame), key the\n"
+			"ragdoll, and ease ragdollWeight down; the parts go back onto the clips with what is drawn.  Stays False\n"
+			"without a built ragdoll" )
 #endif
 
 	EXPOSURE_END()

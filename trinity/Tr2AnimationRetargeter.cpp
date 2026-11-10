@@ -562,6 +562,10 @@ bool Tr2AnimationRetargeter::SetRagdoll( Tr2PhysicsWorld* world, int id )
 	}
 	m_ragdollWorld = world;
 	m_ragdoll = id;
+	// A pose frozen from another ragdoll is not this one's
+	m_ragdollFrozen = false;
+	m_ragdollFrozenPositions.clear();
+	m_ragdollFrozenRotations.clear();
 	m_lastRagdollVersion = -1;
 	m_ragdollWarned = false;
 	m_lastPoseCurrent = false;
@@ -640,6 +644,26 @@ bool Tr2AnimationRetargeter::GetRagdollOn() const
 void Tr2AnimationRetargeter::SetRagdollOn( bool on )
 {
 	m_ragdollOn = on;
+	m_lastPoseCurrent = false;
+}
+
+bool Tr2AnimationRetargeter::GetRagdollFrozen() const
+{
+	return m_ragdollFrozen && HasRagdoll();
+}
+
+void Tr2AnimationRetargeter::SetRagdollFrozen( bool frozen )
+{
+	m_ragdollFrozenPositions.clear();
+	m_ragdollFrozenRotations.clear();
+	m_ragdollFrozen = false;
+#ifdef TRINITY_HAS_PHYSICS_WORLD
+	std::vector<char> dynamic;
+	if( frozen && m_ragdollWorld && m_ragdollWorld->GetRagdollPose( m_ragdoll, m_ragdollFrozenPositions, m_ragdollFrozenRotations, dynamic ) )
+	{
+		m_ragdollFrozen = true;
+	}
+#endif
 	m_lastPoseCurrent = false;
 }
 
@@ -1979,10 +2003,55 @@ void Tr2AnimationRetargeter::ApplyRagdoll( const cmf::Skeleton& skeleton, cmf::S
 	const size_t boneCount = skeleton.bones.size();
 
 	// The pose the clips and the feet, head and hands have made is where the ragdoll's parts are to be: keyed parts
-	// are moved there by the world's next step, so they push what the body pushes and carry its speed when let go
+	// are moved there by the world's next step, so they push what the body pushes and carry its speed when let go.
+	// Frozen, the pose drawn is, made below
+	const bool frozen = m_ragdollFrozen && m_ragdollFrozenPositions.size() == partCount;
+	if( !frozen && !GiveRagdollTarget( skeleton, pose ) )
+	{
+		return;
+	}
+
+	const float weight = Clamp01( m_ragdollWeight );
+	if( weight <= 0.f )
+	{
+		if( frozen )
+		{
+			GiveRagdollTarget( skeleton, pose );
+		}
+		return;
+	}
+	if( frozen )
+	{
+		// Where it lay when frozen, the whole of it: the model may be put somewhere else since, under it
+		m_ragdollPositions = m_ragdollFrozenPositions;
+		m_ragdollRotations = m_ragdollFrozenRotations;
+		m_ragdollDynamic.assign( partCount, 1 );
+	}
+	else
+	{
+		const Vector3 rootTargetPosition = m_ragdollPositions[0];
+		const Quaternion rootTargetRotation = m_ragdollRotations[0];
+		if( !m_ragdollWorld->GetRagdollPose( m_ragdoll, m_ragdollPositions, m_ragdollRotations, m_ragdollDynamic ) || m_ragdollPositions.size() != partCount )
+		{
+			return;	// the ragdoll in the world is not the one the bones were given for
+		}
+		ReRootPowered( rootTargetPosition, rootTargetRotation );
+	}
+	ApplyRagdollPose( skeleton, pose, weight );
+	if( frozen )
+	{
+		GiveRagdollTarget( skeleton, pose );
+	}
+#endif
+}
+
+#ifdef TRINITY_HAS_PHYSICS_WORLD
+bool Tr2AnimationRetargeter::GiveRagdollTarget( const cmf::Skeleton& skeleton, const cmf::SkeletonPose& pose )
+{
+	const size_t partCount = m_ragdollBones.size();
 	ComputeWorld( skeleton, pose.boneTransforms.data(), m_ikWorld );
-	m_ragdollPositions.resize( partCount );
-	m_ragdollRotations.resize( partCount );
+	m_ragdollTargetPositions.resize( partCount );
+	m_ragdollTargetRotations.resize( partCount );
 	for( const RagdollBone& part : m_ragdollBones )
 	{
 		const cmf::Transform& bone = m_ikWorld[part.bone];
@@ -1990,30 +2059,26 @@ void Tr2AnimationRetargeter::ApplyRagdoll( const cmf::Skeleton& skeleton, cmf::S
 		const Vector3 position = ( bone.position + offset ) * m_ragdollFrameScale;
 		const Vector3 placed = XMVector3Rotate( position, m_ragdollFrameRotation );
 		const Quaternion rotation = XMQuaternionMultiply( part.offsetRotation, bone.rotation );
-		m_ragdollPositions[part.part] = m_ragdollFramePosition + placed;
-		m_ragdollRotations[part.part] = XMQuaternionNormalize( XMQuaternionMultiply( rotation, m_ragdollFrameRotation ) );
+		m_ragdollTargetPositions[part.part] = m_ragdollFramePosition + placed;
+		m_ragdollTargetRotations[part.part] = XMQuaternionNormalize( XMQuaternionMultiply( rotation, m_ragdollFrameRotation ) );
 	}
-	if( !m_ragdollWorld->SetRagdollTarget( m_ragdoll, m_ragdollPositions, m_ragdollRotations ) )
+	m_ragdollPositions = m_ragdollTargetPositions;
+	m_ragdollRotations = m_ragdollTargetRotations;
+	if( !m_ragdollWorld->SetRagdollTarget( m_ragdoll, m_ragdollTargetPositions, m_ragdollTargetRotations ) )
 	{
 		if( !m_ragdollWarned )
 		{
 			CCP_LOGWARN( "Tr2AnimationRetargeter: ragdoll %d has another number of parts than the %u bones it was given; it stays on the clips", m_ragdoll, (unsigned)partCount );
 			m_ragdollWarned = true;
 		}
-		return;
+		return false;
 	}
+	return true;
+}
 
-	const float weight = Clamp01( m_ragdollWeight );
-	if( weight <= 0.f )
-	{
-		return;
-	}
-	const Vector3 rootTargetPosition = m_ragdollPositions[0];
-	const Quaternion rootTargetRotation = m_ragdollRotations[0];
-	if( !m_ragdollWorld->GetRagdollPose( m_ragdoll, m_ragdollPositions, m_ragdollRotations, m_ragdollDynamic ) || m_ragdollPositions.size() != partCount )
-	{
-		return;	// the ragdoll in the world is not the one the bones were given for
-	}
+void Tr2AnimationRetargeter::ReRootPowered( const Vector3& rootTargetPosition, const Quaternion& rootTargetRotation )
+{
+	const size_t partCount = m_ragdollBones.size();
 	if( !m_ragdollDynamic[0] )
 	{
 		// Powered: the parts the simulation moves hang from a root that is keyed, and so a step behind the pose being
@@ -2031,6 +2096,11 @@ void Tr2AnimationRetargeter::ApplyRagdoll( const cmf::Skeleton& skeleton, cmf::S
 			}
 		}
 	}
+}
+
+void Tr2AnimationRetargeter::ApplyRagdollPose( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose, float weight )
+{
+	const size_t boneCount = skeleton.bones.size();
 
 	// The turn each part the simulation moves gives its bone, in the model's space; a keyed part is where the clips
 	// had it a step ago, and its bone stays on the clips
@@ -2098,8 +2168,8 @@ void Tr2AnimationRetargeter::ApplyRagdoll( const cmf::Skeleton& skeleton, cmf::S
 			m_ikMoved.push_back( i );
 		}
 	}
-#endif
 }
+#endif
 
 void Tr2AnimationRetargeter::RedriveHelpers( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose ) const
 {
