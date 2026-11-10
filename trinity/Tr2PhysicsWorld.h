@@ -198,6 +198,10 @@ public:
 	int GetRagdollMode( int id ) const;
 	bool SetRagdollMode( int id, int mode );
 	bool PlaceRagdoll( int id, const std::vector<Vector3>& positions, const std::vector<Quaternion>& rotations );
+	bool SetRagdollTarget( int id, const std::vector<Vector3>& positions, const std::vector<Quaternion>& rotations );
+	// For Tr2AnimationRetargeter, not exposed: each part's place and turn, and whether the simulation moves it (1) or
+	// the caller does (0).  False, the vectors left as they were, if it is not built
+	bool GetRagdollPose( int id, std::vector<Vector3>& positions, std::vector<Quaternion>& rotations, std::vector<char>& dynamic ) const;
 	std::vector<std::pair<Vector3, Quaternion>> GetRagdollTransforms( int id ) const;
 	bool SetRagdollFriction( int id, float torque );
 	bool IsRagdollActive( int id ) const;

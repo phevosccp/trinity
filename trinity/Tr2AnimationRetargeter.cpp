@@ -3,6 +3,7 @@
 #include "StdAfx.h"
 #include "Tr2AnimationRetargeter.h"
 #include "Tr2GrannyAnimation.h"
+#include "Tr2PhysicsWorld.h"
 #include "Resources/TriGrannyRes.h"
 
 #include <TriMath.h>
@@ -552,6 +553,95 @@ std::vector<std::pair<std::string, std::string>> Tr2AnimationRetargeter::GetFire
 	return fired;
 }
 
+bool Tr2AnimationRetargeter::SetRagdoll( Tr2PhysicsWorld* world, int id )
+{
+#ifdef TRINITY_HAS_PHYSICS_WORLD
+	if( ( world == nullptr ) != ( id == 0 ) || id < 0 )
+	{
+		return false;	// a world and a ragdoll in it, or neither
+	}
+	m_ragdollWorld = world;
+	m_ragdoll = id;
+	m_lastRagdollStep = -1;
+	m_lastPoseCurrent = false;
+	return true;
+#else
+	return false;	// this build has no physics world
+#endif
+}
+
+bool Tr2AnimationRetargeter::AddRagdollBone( int part, const std::string& bone, const Vector3& offsetPosition, const Quaternion& offsetRotation )
+{
+	const float length = XMVectorGetX( XMQuaternionLength( offsetRotation ) );
+	if( part < 0 || bone.empty() || !AllFinite( offsetPosition ) || !std::isfinite( length ) || length < 1e-6f )
+	{
+		return false;
+	}
+	auto existing = std::find_if( m_ragdollBones.begin(), m_ragdollBones.end(), [&]( const RagdollBone& entry ) { return entry.part == part; } );
+	RagdollBone& entry = existing != m_ragdollBones.end() ? *existing : m_ragdollBones.emplace_back();
+	entry.part = part;
+	entry.name = bone;
+	entry.offsetPosition = offsetPosition;
+	entry.offsetRotation = XMQuaternionNormalize( offsetRotation );
+	entry.bone = NO_BONE;
+	m_needsBind = true;
+	return true;
+}
+
+bool Tr2AnimationRetargeter::AddRagdollChain( const std::string& first, const std::string& last )
+{
+	if( first.empty() || last.empty() || first == last )
+	{
+		return false;
+	}
+	m_ragdollChains.emplace_back( first, last );
+	m_needsBind = true;
+	return true;
+}
+
+void Tr2AnimationRetargeter::ClearRagdollBones()
+{
+	m_ragdollBones.clear();
+	m_ragdollChains.clear();
+	m_needsBind = true;
+}
+
+bool Tr2AnimationRetargeter::SetRagdollFrame( const Vector3& position, const Quaternion& rotation, float scale )
+{
+	const float length = XMVectorGetX( XMQuaternionLength( rotation ) );
+	if( !AllFinite( position ) || !std::isfinite( length ) || length < 1e-6f || !std::isfinite( scale ) || scale < 1e-6f )
+	{
+		return false;
+	}
+	m_ragdollFramePosition = position;
+	m_ragdollFrameRotation = XMQuaternionNormalize( rotation );
+	m_ragdollFrameScale = scale;
+	m_lastPoseCurrent = false;
+	return true;
+}
+
+float Tr2AnimationRetargeter::GetRagdollWeight() const
+{
+	return m_ragdollWeight;
+}
+
+void Tr2AnimationRetargeter::SetRagdollWeight( float weight )
+{
+	m_ragdollWeight = Clamp01( weight );
+	m_lastPoseCurrent = false;
+}
+
+bool Tr2AnimationRetargeter::GetRagdollOn() const
+{
+	return m_ragdollOn;
+}
+
+void Tr2AnimationRetargeter::SetRagdollOn( bool on )
+{
+	m_ragdollOn = on;
+	m_lastPoseCurrent = false;
+}
+
 void Tr2AnimationRetargeter::AddRig( const std::string& name, const std::string& bindPosePath, const std::string& rootBone )
 {
 	Rig* rig = FindRig( name );
@@ -900,6 +990,13 @@ void Tr2AnimationRetargeter::Unbind()
 		look.bone = NO_BONE;
 	}
 	m_lookBound = false;
+	for( RagdollBone& part : m_ragdollBones )
+	{
+		part.bone = NO_BONE;
+	}
+	m_ragdollShares.clear();
+	m_ragdollShareForBone.clear();
+	m_ragdollBound = false;
 	m_bound = false;
 	m_boundTargetBoneCount = 0;
 	m_groundCalibrated = false;
@@ -956,6 +1053,7 @@ bool Tr2AnimationRetargeter::Bind( const cmf::Skeleton& target )
 
 	BindHelpersAndLegs( target, targetBind, targetBindWorld );
 	BindReach( target, targetBind, targetBindWorld );
+	BindRagdoll( target, targetBind, targetBindWorld );
 
 	for( uint32_t r = 0; r < m_rigs.size(); ++r )
 	{
@@ -1762,6 +1860,219 @@ void Tr2AnimationRetargeter::ReachWithHands( const cmf::Skeleton& skeleton, cmf:
 	}
 }
 
+void Tr2AnimationRetargeter::BindRagdoll( const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld )
+{
+	m_ragdollBound = false;
+	m_ragdollShares.clear();
+	m_ragdollShareForBone.assign( target.bones.size(), -1 );
+	if( m_ragdollBones.empty() )
+	{
+		return;
+	}
+	// A bone for each part, from part 0 up with none left out: the target is given part by part
+	std::sort( m_ragdollBones.begin(), m_ragdollBones.end(), []( const RagdollBone& a, const RagdollBone& b ) { return a.part < b.part; } );
+	std::vector<char> partOfBone( target.bones.size(), 0 );
+	for( size_t k = 0; k < m_ragdollBones.size(); ++k )
+	{
+		RagdollBone& part = m_ragdollBones[k];
+		part.bone = FindBone( target, part.name );
+		if( part.part != (int)k || part.bone == NO_BONE || partOfBone[part.bone] )
+		{
+			CCP_LOGWARN( "Tr2AnimationRetargeter: the ragdoll's parts need a bone each, in the skeleton and no two the same, with no part left out: part %d (%s)", part.part, part.name.c_str() );
+			return;
+		}
+		partOfBone[part.bone] = 1;
+	}
+
+	auto bindIndex = [&]( uint32_t bone ) { return FindBone( targetBind, cmf::ToStdString( target.bones[bone] ) ); };
+	for( const auto& chain : m_ragdollChains )
+	{
+		const uint32_t first = FindBone( target, chain.first );
+		const uint32_t last = FindBone( target, chain.second );
+		if( first == NO_BONE || last == NO_BONE || !partOfBone[first] || !partOfBone[last] )
+		{
+			CCP_LOGWARN( "Tr2AnimationRetargeter: the ragdoll's chain %s to %s needs both ends in the skeleton, each a part's bone", chain.first.c_str(), chain.second.c_str() );
+			continue;
+		}
+		// The bones from the first down to the last
+		std::vector<uint32_t> path{ last };
+		while( path.back() != first && HasParent( target, path.back() ) )
+		{
+			path.push_back( target.parents[path.back()] );
+		}
+		if( path.back() != first )
+		{
+			CCP_LOGWARN( "Tr2AnimationRetargeter: the ragdoll's chain %s to %s: %s is not above %s", chain.first.c_str(), chain.second.c_str(), chain.first.c_str(), chain.second.c_str() );
+			continue;
+		}
+		std::reverse( path.begin(), path.end() );
+
+		// How far down the chain each bone sits in the target bind pose
+		std::vector<uint32_t> bind( path.size() );
+		std::vector<float> along( path.size(), 0.f );
+		bool complete = true;
+		for( size_t k = 0; k < path.size(); ++k )
+		{
+			bind[k] = bindIndex( path[k] );
+			complete = complete && bind[k] != NO_BONE;
+			if( complete && k > 0 )
+			{
+				along[k] = along[k - 1] + Length( targetBindWorld[bind[k]].position - targetBindWorld[bind[k - 1]].position );
+			}
+		}
+		if( !complete )
+		{
+			CCP_LOGWARN( "Tr2AnimationRetargeter: the ragdoll's chain %s to %s has a bone the target bind pose lacks", chain.first.c_str(), chain.second.c_str() );
+			continue;
+		}
+
+		// Between each two parts' bones, the bones that are no part's take a share of their turns
+		size_t from = 0;
+		for( size_t k = 1; k < path.size(); ++k )
+		{
+			if( !partOfBone[path[k]] )
+			{
+				continue;
+			}
+			const float span = along[k] - along[from];
+			for( size_t j = from + 1; j < k; ++j )
+			{
+				if( m_ragdollShareForBone[path[j]] >= 0 )
+				{
+					continue;	// an earlier chain has it
+				}
+				RagdollShare share;
+				share.from = path[from];
+				share.to = path[k];
+				share.share = span > 1e-6f ? ( along[j] - along[from] ) / span : 0.5f;
+				share.bindWorld = targetBindWorld[bind[j]].rotation;
+				share.fromBindWorld = targetBindWorld[bind[from]].rotation;
+				share.toBindWorld = targetBindWorld[bind[k]].rotation;
+				m_ragdollShareForBone[path[j]] = (int32_t)m_ragdollShares.size();
+				m_ragdollShares.push_back( share );
+			}
+			from = k;
+		}
+	}
+	m_ragdollBound = true;
+}
+
+bool Tr2AnimationRetargeter::HasRagdoll() const
+{
+#ifdef TRINITY_HAS_PHYSICS_WORLD
+	// One not built, or removed since, has no mode
+	return m_ragdollOn && m_ragdollWorld && m_ragdoll != 0 && !m_ragdollBones.empty() && m_ragdollWorld->GetRagdollMode( m_ragdoll ) >= 0;
+#else
+	return false;
+#endif
+}
+
+void Tr2AnimationRetargeter::ApplyRagdoll( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose )
+{
+#ifdef TRINITY_HAS_PHYSICS_WORLD
+	if( !m_ragdollBound || !HasRagdoll() )
+	{
+		return;
+	}
+	const size_t partCount = m_ragdollBones.size();
+	const size_t boneCount = skeleton.bones.size();
+
+	// The pose the clips and the feet, head and hands have made is where the ragdoll's parts are to be: keyed parts
+	// are moved there by the world's next step, so they push what the body pushes and carry its speed when let go
+	ComputeWorld( skeleton, pose.boneTransforms.data(), m_ikWorld );
+	m_ragdollPositions.resize( partCount );
+	m_ragdollRotations.resize( partCount );
+	for( const RagdollBone& part : m_ragdollBones )
+	{
+		const cmf::Transform& bone = m_ikWorld[part.bone];
+		const Vector3 offset = XMVector3Rotate( part.offsetPosition, bone.rotation );
+		const Vector3 position = ( bone.position + offset ) * m_ragdollFrameScale;
+		const Vector3 placed = XMVector3Rotate( position, m_ragdollFrameRotation );
+		const Quaternion rotation = XMQuaternionMultiply( part.offsetRotation, bone.rotation );
+		m_ragdollPositions[part.part] = m_ragdollFramePosition + placed;
+		m_ragdollRotations[part.part] = XMQuaternionNormalize( XMQuaternionMultiply( rotation, m_ragdollFrameRotation ) );
+	}
+	m_ragdollWorld->SetRagdollTarget( m_ragdoll, m_ragdollPositions, m_ragdollRotations );
+
+	const float weight = Clamp01( m_ragdollWeight );
+	if( weight <= 0.f )
+	{
+		return;
+	}
+	if( !m_ragdollWorld->GetRagdollPose( m_ragdoll, m_ragdollPositions, m_ragdollRotations, m_ragdollDynamic ) || m_ragdollPositions.size() != partCount )
+	{
+		return;	// the ragdoll in the world is not the one the bones were given for
+	}
+
+	// The turn each part the simulation moves gives its bone, in the model's space; a keyed part is where the clips
+	// had it a step ago, and its bone stays on the clips
+	const Quaternion frameBack = XMQuaternionConjugate( m_ragdollFrameRotation );
+	m_ragdollBoneRotation.resize( boneCount );
+	m_ragdollTaken.assign( boneCount, 0 );
+	uint32_t rootBone = NO_BONE;
+	Vector3 rootPosition( 0.f, 0.f, 0.f );
+	for( const RagdollBone& part : m_ragdollBones )
+	{
+		if( !m_ragdollDynamic[part.part] )
+		{
+			continue;
+		}
+		const Quaternion partRotation = XMQuaternionMultiply( m_ragdollRotations[part.part], frameBack );
+		const Quaternion rotation = XMQuaternionNormalize( XMQuaternionMultiply( XMQuaternionConjugate( part.offsetRotation ), partRotation ) );
+		m_ragdollBoneRotation[part.bone] = rotation;
+		m_ragdollTaken[part.bone] = 1;
+		if( part.part == 0 )
+		{
+			// The root part alone says where the body is: every other bone hangs from its parent at its own length
+			const Vector3 partPosition = XMVector3Rotate( m_ragdollPositions[0] - m_ragdollFramePosition, frameBack );
+			const Vector3 offset = XMVector3Rotate( part.offsetPosition, rotation );
+			rootBone = part.bone;
+			rootPosition = partPosition / m_ragdollFrameScale - offset;
+		}
+	}
+
+	// The ragdoll's whole pose, parents first, each bone blended in by the weight as it is made
+	const cmf::Transform identity{ Vector3( 0.f, 0.f, 0.f ), IdentityQuaternion(), Vector3( 1.f, 1.f, 1.f ) };
+	m_ragdollPose.resize( boneCount );
+	for( uint32_t i = 0; i < boneCount; ++i )
+	{
+		const cmf::Transform& parentWorld = HasParent( skeleton, i ) ? m_ragdollPose[skeleton.parents[i]] : identity;
+		cmf::Transform local = pose.boneTransforms[i];
+		bool moved = false;
+		if( m_ragdollTaken[i] )
+		{
+			local.rotation = XMQuaternionNormalize( XMQuaternionMultiply( m_ragdollBoneRotation[i], XMQuaternionConjugate( parentWorld.rotation ) ) );
+			if( i == rootBone )
+			{
+				local.position = cmf::TransformPoint( rootPosition, cmf::Inverse( parentWorld ) );
+			}
+			moved = true;
+		}
+		else if( m_ragdollShareForBone[i] >= 0 )
+		{
+			const RagdollShare& share = m_ragdollShares[m_ragdollShareForBone[i]];
+			if( m_ragdollTaken[share.from] && m_ragdollTaken[share.to] )
+			{
+				// The two parts' turns from their bind poses, in the model's space, shared out by where it sits between them
+				const Quaternion from = XMQuaternionMultiply( XMQuaternionConjugate( share.fromBindWorld ), m_ragdollBoneRotation[share.from] );
+				const Quaternion to = XMQuaternionMultiply( XMQuaternionConjugate( share.toBindWorld ), m_ragdollBoneRotation[share.to] );
+				const Quaternion world = XMQuaternionNormalize( XMQuaternionMultiply( share.bindWorld, XMQuaternionSlerp( from, to, share.share ) ) );
+				local.rotation = XMQuaternionNormalize( XMQuaternionMultiply( world, XMQuaternionConjugate( parentWorld.rotation ) ) );
+				moved = true;
+			}
+		}
+		m_ragdollPose[i] = HasParent( skeleton, i ) ? cmf::Multiply( local, parentWorld ) : local;
+		if( moved )
+		{
+			cmf::Transform& made = pose.boneTransforms[i];
+			made.rotation = XMQuaternionNormalize( XMQuaternionSlerp( made.rotation, local.rotation, weight ) );
+			made.position = made.position + ( local.position - made.position ) * weight;
+			m_ikMoved.push_back( i );
+		}
+	}
+#endif
+}
+
 void Tr2AnimationRetargeter::RedriveHelpers( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose ) const
 {
 	if( !m_helperDriversOn || m_ikMoved.empty() )
@@ -1887,6 +2198,9 @@ void Tr2AnimationRetargeter::ModifyPose( const cmf::Skeleton& skeleton, cmf::Ske
 	m_lastSkeleton = &skeleton;
 	m_lastPose = pose;
 	m_lastPoseCurrent = true;
+#ifdef TRINITY_HAS_PHYSICS_WORLD
+	m_lastRagdollStep = m_ragdollWorld ? m_ragdollWorld->GetStepCount() : -1;
+#endif
 }
 
 bool Tr2AnimationRetargeter::IsLastPose( const cmf::Skeleton& skeleton, const cmf::SkeletonPose& input ) const
@@ -1895,6 +2209,13 @@ bool Tr2AnimationRetargeter::IsLastPose( const cmf::Skeleton& skeleton, const cm
 	{
 		return false;
 	}
+#ifdef TRINITY_HAS_PHYSICS_WORLD
+	// A ragdoll's parts move with the world's steps, whatever the clips do
+	if( HasRagdoll() && m_ragdollWorld->GetStepCount() != m_lastRagdollStep )
+	{
+		return false;
+	}
+#endif
 	for( size_t i = 0; i < m_lastInput.size(); ++i )
 	{
 		const cmf::Transform& a = m_lastInput[i];
@@ -1983,7 +2304,7 @@ void Tr2AnimationRetargeter::Apply( const cmf::Skeleton& skeleton, cmf::Skeleton
 	}
 	// Standing in the pose below with no clip showing, the feet may still need standing on the ground, and the head and
 	// hands turning to their targets
-	const bool posing = total > 0.f || HasGroundToStandOn() || HasTargets();
+	const bool posing = total > 0.f || HasGroundToStandOn() || HasTargets() || HasRagdoll();
 	if( posing && ( m_needsBind || m_boundTargetBoneCount != skeleton.bones.size() ) )
 	{
 		Bind( skeleton );
@@ -2045,11 +2366,13 @@ void Tr2AnimationRetargeter::Apply( const cmf::Skeleton& skeleton, cmf::Skeleton
 		cmf::BlendPoses( pose, pose, m_layerPose, m_blendWeights, 1.f );
 	}
 
-	// The head turns before the hands reach, as turning the spine moves the shoulders they reach from; then the helpers
-	// of the bones moved follow them
+	// The head turns before the hands reach, as turning the spine moves the shoulders they reach from; the ragdoll is
+	// given the pose those leave, and takes over as much of it as its weight says; then the helpers of the bones moved
+	// follow them
 	m_ikMoved.clear();
 	StandOnGround( skeleton, pose );
 	LookAtTarget( skeleton, pose );
 	ReachWithHands( skeleton, pose );
+	ApplyRagdoll( skeleton, pose );
 	RedriveHelpers( skeleton, pose );
 }

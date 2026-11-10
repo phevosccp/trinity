@@ -8,6 +8,7 @@
 
 BLUE_DECLARE( TriGrannyRes );
 BLUE_DECLARE( Tr2GrannyAnimation );
+BLUE_DECLARE( Tr2PhysicsWorld );
 BLUE_DECLARE( Tr2AnimationRetargeter );
 
 /**
@@ -63,6 +64,15 @@ BLUE_DECLARE( Tr2AnimationRetargeter );
  * where the model's +Z points in the target bind pose.  The feet stand first, then the head turns, then the hands reach
  * from where the turned spine leaves the shoulders; last, the helper drivers turn the helpers of the bones these moved,
  * even in a clip whose rig pairs them.
+ *
+ * A ragdoll (SetRagdoll) is a body of parts in a Tr2PhysicsWorld, each part standing for a bone (AddRagdollBone, with
+ * the part's frame in the bone's).  The world's frame is not the model's, so every frame the caller says where the
+ * model is in it (SetRagdollFrame).  The stage comes last but for the helpers.  It hands the world the pose made so
+ * far as the ragdoll's target, which keyed parts move to; and by ragdollWeight it takes the ragdoll's pose back for
+ * the parts the simulation moves: each such part's bone takes its part's turn (the root part's bone its place too), the
+ * bones of a ragdoll chain (AddRagdollChain) between two parts' bones share their turns as a rig's chain does, and
+ * every other bone keeps its turn in its parent, so no bone stretches and fingers follow hands.  The world is stepped
+ * by the caller before the pose is made, so the parts read are this frame's and the target is the next step's.
  *
  * Clips raise events (SetClipEvents) as they play past them, read back with GetFiredEvents.
  *
@@ -123,6 +133,16 @@ public:
 	bool SetLookTarget( const Vector3& position, float weight, float maxDegrees );
 	bool SetClipEvents( const std::string& clip, const std::vector<std::pair<float, std::string>>& events );
 	std::vector<std::pair<std::string, std::string>> GetFiredEvents();
+
+	bool SetRagdoll( Tr2PhysicsWorld* world, int id );
+	bool AddRagdollBone( int part, const std::string& bone, const Vector3& offsetPosition, const Quaternion& offsetRotation );
+	bool AddRagdollChain( const std::string& first, const std::string& last );
+	void ClearRagdollBones();
+	bool SetRagdollFrame( const Vector3& position, const Quaternion& rotation, float scale );
+	float GetRagdollWeight() const;
+	void SetRagdollWeight( float weight );
+	bool GetRagdollOn() const;
+	void SetRagdollOn( bool on );
 
 	void AddRig( const std::string& name, const std::string& bindPosePath, const std::string& rootBone );
 	bool MapBone( const std::string& rig, const std::string& sourceBone, const std::string& targetBone );
@@ -307,6 +327,28 @@ private:
 		uint32_t bone = NO_BONE;
 	};
 
+	// A ragdoll part and the bone it stands for
+	struct RagdollBone
+	{
+		int part = -1;
+		std::string name;
+		Vector3 offsetPosition = Vector3( 0.f, 0.f, 0.f );	// the part's frame in the bone's
+		Quaternion offsetRotation = Quaternion( 0.f, 0.f, 0.f, 1.f );
+
+		uint32_t bone = NO_BONE;
+	};
+
+	// A bone between two parts' bones, which takes a share of their turns from the target bind pose
+	struct RagdollShare
+	{
+		uint32_t from = NO_BONE;	// the part's bone above it
+		uint32_t to = NO_BONE;	// the part's bone below it
+		float share = 0.f;	// how far down from the one to the other it sits, 0 to 1, by length
+		Quaternion bindWorld;	// its rotation in the target bind pose, and the ends'
+		Quaternion fromBindWorld;
+		Quaternion toBindWorld;
+	};
+
 	static uint32_t FindBone( const cmf::Skeleton& skeleton, const std::string& name );
 
 	Rig* FindRig( const std::string& name );
@@ -329,6 +371,9 @@ private:
 	bool HasTargets() const;
 	void LookAtTarget( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
 	void ReachWithHands( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
+	void BindRagdoll( const cmf::Skeleton& target, const cmf::Skeleton& targetBind, const std::vector<cmf::Transform>& targetBindWorld );
+	bool HasRagdoll() const;
+	void ApplyRagdoll( const cmf::Skeleton& skeleton, cmf::SkeletonPose& pose );
 	void FireEvents();
 	void Unbind();
 	bool IsPlayable( const Clip& clip ) const;
@@ -364,7 +409,26 @@ private:
 	float m_lookWeight = 0.f;
 	float m_lookMaxAngle = XM_PI;	// radians the head may turn from where the clips hold it
 	std::vector<std::pair<std::string, std::string>> m_firedEvents;	// clip and event, since last read
-	std::vector<uint32_t> m_ikMoved;	// the bones the feet, look and hands turned in the pose being made
+	Tr2PhysicsWorldPtr m_ragdollWorld;	// keeps the world alive; the world knows nothing of this
+	int m_ragdoll = 0;	// the ragdoll's id in it, 0 for none
+	bool m_ragdollOn = true;
+	float m_ragdollWeight = 0.f;	// how much of the pose is the ragdoll's, 0 to 1
+	Vector3 m_ragdollFramePosition = Vector3( 0.f, 0.f, 0.f );	// the model's place in the world's frame
+	Quaternion m_ragdollFrameRotation = Quaternion( 0.f, 0.f, 0.f, 1.f );
+	float m_ragdollFrameScale = 1.f;
+	std::vector<RagdollBone> m_ragdollBones;	// by part once bound, one for each part from 0 up
+	std::vector<std::pair<std::string, std::string>> m_ragdollChains;	// first and last bone of each
+	bool m_ragdollBound = false;
+	std::vector<RagdollShare> m_ragdollShares;
+	std::vector<int32_t> m_ragdollShareForBone;	// index into m_ragdollShares, -1 for bones no chain shares out to
+	std::vector<Vector3> m_ragdollPositions;	// per part, in the world's frame: the target given, then the parts read
+	std::vector<Quaternion> m_ragdollRotations;
+	std::vector<char> m_ragdollDynamic;	// per part, whether the simulation moves it
+	std::vector<Quaternion> m_ragdollBoneRotation;	// per target bone, the turn its part gives it, in the model's space
+	std::vector<char> m_ragdollTaken;	// per target bone, whether a part gave it one in the pose being made
+	std::vector<cmf::Transform> m_ragdollPose;	// per target bone, the ragdoll's whole pose in the model's space
+	int m_lastRagdollStep = -1;	// the world's step the last pose was made after
+	std::vector<uint32_t> m_ikMoved;	// the bones the feet, look, hands and ragdoll turned in the pose being made
 	std::vector<Quaternion> m_turnForBone;	// per target bone, the rig's turns of it and the bones above it, in the model's space
 	std::vector<Quaternion> m_linkWorld;	// per link of the rig being retargeted, the world rotation its target bone takes
 	std::vector<cmf::Transform> m_ikWorld;

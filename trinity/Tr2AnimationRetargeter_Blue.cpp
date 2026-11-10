@@ -3,6 +3,7 @@
 #include "StdAfx.h"
 #include "Tr2AnimationRetargeter.h"
 #include "Tr2GrannyAnimation.h"
+#include "Tr2PhysicsWorld.h"
 
 BLUE_DEFINE( Tr2AnimationRetargeter );
 
@@ -315,6 +316,57 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 			GetModelTransforms,
 			"The last pose made, per bone a (position, rotation) in the model's space; empty before one is made.  With an\n"
 			"animation, this is the pose this retargeter handed it, before the animation's own bone offsets." )
+
+#ifdef TRINITY_HAS_PHYSICS_WORLD
+		MAP_METHOD_AND_WRAP(
+			"SetRagdoll",
+			SetRagdoll,
+			"SetRagdoll( world, id )\n\n"
+			"The ragdoll whose parts stand for this character's bones: a built ragdoll's id in a Tr2PhysicsWorld, which is\n"
+			"kept alive.  ( None, 0 ) lets it go.  Every pose made hands the world the pose as the ragdoll's target\n"
+			"(SetRagdollTarget), and takes the ragdoll's pose back by ragdollWeight.  Returns False for a world without an\n"
+			"id or an id without a world." )
+
+		MAP_METHOD_AND_WRAP(
+			"AddRagdollBone",
+			AddRagdollBone,
+			"AddRagdollBone( part, bone, offsetPosition, offsetRotation )\n\n"
+			"The bone a ragdoll part stands for, replacing the part's last.  Every part needs one, from part 0, the root,\n"
+			"up, and no two the same.  Returns False for anything out of range.\n"
+			":param part: the part's index in its ragdoll\n"
+			":param bone: bone name in the animation's skeleton\n"
+			":param offsetPosition: (x, y, z) of the part's middle in the bone's frame, in the model's units\n"
+			":param offsetRotation: (x, y, z, w) of the part's frame in the bone's" )
+
+		MAP_METHOD_AND_WRAP(
+			"AddRagdollChain",
+			AddRagdollChain,
+			"AddRagdollChain( first, last )\n\n"
+			"The bones between two parts' bones, each no part's own, share the two parts' turns by where they sit between\n"
+			"them, as a rig's chain does: a spine of five bones bends evenly between three parts.\n"
+			":param first: the chain's top bone, a part's\n"
+			":param last: a part's bone below it" )
+
+		MAP_METHOD_AND_WRAP( "ClearRagdollBones", ClearRagdollBones, "Forgets every ragdoll bone and chain" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRagdollFrame",
+			SetRagdollFrame,
+			"SetRagdollFrame( position, rotation, scale )\n\n"
+			"Where the model is in the ragdoll's world's frame, to be given every frame the model moves: the origin at\n"
+			"the world's until set.  Returns False for anything out of range.\n"
+			":param position: (x, y, z) of the model's origin\n"
+			":param rotation: (x, y, z, w) the model is turned by\n"
+			":param scale: the model's size, above 0" )
+
+		MAP_PROPERTY(
+			"ragdollWeight",
+			GetRagdollWeight,
+			SetRagdollWeight,
+			"How much of the pose is the ragdoll's, 0 to 1 (0 until set), for the parts the simulation moves" )
+
+		MAP_PROPERTY( "ragdollOn", GetRagdollOn, SetRagdollOn, "Whether the ragdoll stage runs (on until set)" )
+#endif
 
 	EXPOSURE_END()
 }

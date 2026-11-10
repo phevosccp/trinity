@@ -143,6 +143,9 @@ constexpr float RAGDOLL_MAX_TURN_RATE = 30.f;	// rad/s
 constexpr float RAGDOLL_FRICTION = 3.f;	// N m each joint resists turning by while limp, until set: a body settles
 constexpr float MAX_RAGDOLL_FRICTION = 10000.f;	// N m
 constexpr float MAX_AXIS_SKEW = 0.01f;	// how far from square a joint's twist and plane axes may be given (their dot)
+// m/s: a keyed part asked to go faster than this to its target is put there instead.  A kinematic body's speed has no
+// cap in Jolt, and a model put somewhere else would sweep its ragdoll through all that lies between
+constexpr float RAGDOLL_TELEPORT_SPEED = 20.f;
 
 // Static bodies never meet each other; moving ones (kinematic and dynamic) meet the static and moving ones of their own
 // group.  A character's inner body meets moving bodies of every group.
@@ -604,6 +607,10 @@ struct Tr2PhysicsWorld::Ragdoll
 	int mode = RAGDOLL_KEYED;
 	float friction = RAGDOLL_FRICTION;
 	float mass = 0.f;	// kg of all its parts
+	std::vector<JPH::RVec3> targetPositions;	// per part, where keyed parts are to be after the next step
+	std::vector<JPH::Quat> targetRotations;
+	bool hasTarget = false;
+	bool teleport = true;	// the next target is taken at once: the first since it was built, placed or keyed
 };
 
 struct Tr2PhysicsWorld::Simulation
@@ -676,6 +683,61 @@ struct Tr2PhysicsWorld::Simulation
 		}
 	}
 
+	// The bodies an id names, added to out: a body's own, or every part of a built ragdoll
+	void AppendBodies( int handle, std::vector<JPH::BodyID>& out ) const
+	{
+		const auto body = bodies.find( handle );
+		if( body != bodies.end() )
+		{
+			out.push_back( body->second.id );
+			return;
+		}
+		const auto ragdoll = ragdolls.find( handle );
+		if( ragdoll != ragdolls.end() && ragdoll->second->ragdoll )
+		{
+			const JPH::Array<JPH::BodyID>& parts = ragdoll->second->ragdoll->GetBodyIDs();
+			out.insert( out.end(), parts.begin(), parts.end() );
+		}
+	}
+
+	// Whether every part of a ragdoll is near enough its target to be swept there in seconds
+	bool TargetInReach( const Ragdoll& ragdoll, float seconds ) const
+	{
+		const JPH::BodyInterface& bodyInterface = system.GetBodyInterface();
+		const float reach = RAGDOLL_TELEPORT_SPEED * seconds;
+		for( size_t i = 0; i < ragdoll.targetPositions.size(); ++i )
+		{
+			const JPH::RVec3 position = bodyInterface.GetPosition( ragdoll.ragdoll->GetBodyID( static_cast<int>( i ) ) );
+			if( JPH::Vec3( ragdoll.targetPositions[i] - position ).LengthSq() > reach * reach )
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	// A keyed ragdoll's parts on their way to its target, to be there after a step of seconds: swept, so they shove what
+	// they meet and carry the speed, or put there at once if that is too far or the target is the first it has had
+	void MoveToTarget( Ragdoll& ragdoll, float seconds )
+	{
+		JPH::BodyInterface& bodyInterface = system.GetBodyInterface();
+		const bool sweep = !ragdoll.teleport && TargetInReach( ragdoll, seconds );
+		for( size_t i = 0; i < ragdoll.targetPositions.size(); ++i )
+		{
+			const JPH::BodyID part = ragdoll.ragdoll->GetBodyID( static_cast<int>( i ) );
+			if( sweep )
+			{
+				bodyInterface.MoveKinematic( part, ragdoll.targetPositions[i], ragdoll.targetRotations[i], seconds );
+			}
+			else
+			{
+				bodyInterface.SetPositionAndRotation( part, ragdoll.targetPositions[i], ragdoll.targetRotations[i], JPH::EActivation::Activate );
+				bodyInterface.SetLinearAndAngularVelocity( part, JPH::Vec3::sZero(), JPH::Vec3::sZero() );
+			}
+		}
+		ragdoll.teleport = false;
+	}
+
 	// A ragdoll goes whole: its joints first, then its parts, which are its own to destroy
 	void RemoveRagdoll( int handle )
 	{
@@ -740,6 +802,7 @@ struct Tr2PhysicsWorld::Simulation
 	std::unordered_map<int, std::unique_ptr<Ragdoll>> ragdolls;	// the same ids; each part's body is in bodies too
 	int nextId = 1;
 	int stepCount = 0;
+	float lastStepSeconds = MAX_STEP;	// how long the last step was: a keyed part let go takes its speed from its move over that
 };
 
 Tr2PhysicsWorld::Tr2PhysicsWorld( IRoot* lockobj )
@@ -1366,9 +1429,13 @@ Vector3 Tr2PhysicsWorld::GetLinearVelocity( int id ) const
 bool Tr2PhysicsWorld::SetLinearVelocity( int id, const Vector3& velocity )
 {
 	const Body* body = FindMoving( id );
-	if( !body || !Within( velocity, MAX_SPEED ) )
+	if( !body || !Within( velocity, body->ragdoll != 0 ? RAGDOLL_MAX_SPEED : MAX_SPEED ) )
 	{
 		return false;
+	}
+	if( body->ragdoll != 0 && m_simulation->system.GetBodyInterface().GetMotionType( body->id ) != JPH::EMotionType::Dynamic )
+	{
+		return false;	// a keyed part goes where its ragdoll's target says, not off by itself
 	}
 	m_simulation->system.GetBodyInterface().SetLinearVelocity( body->id, ToJolt( velocity ) );	// wakes it
 	return true;
@@ -1383,11 +1450,15 @@ Vector3 Tr2PhysicsWorld::GetAngularVelocity( int id ) const
 bool Tr2PhysicsWorld::SetAngularVelocity( int id, const Vector3& velocity )
 {
 	const Body* body = FindMoving( id );
-	if( !body || !Within( velocity, MAX_TURN_RATE ) )
+	if( !body || !Within( velocity, body->ragdoll != 0 ? RAGDOLL_MAX_TURN_RATE : MAX_TURN_RATE ) )
 	{
 		return false;
 	}
 	JPH::BodyInterface& bodyInterface = m_simulation->system.GetBodyInterface();
+	if( body->ragdoll != 0 && bodyInterface.GetMotionType( body->id ) != JPH::EMotionType::Dynamic )
+	{
+		return false;	// as SetLinearVelocity
+	}
 	bodyInterface.SetAngularVelocity( body->id, ToJolt( velocity ) );	// an upright body's allowed freedoms drop it
 	bodyInterface.ActivateBody( body->id );
 	return true;
@@ -1865,11 +1936,7 @@ bool Tr2PhysicsWorld::SetCharacterIgnored( int id, const std::vector<int>& ignor
 	found->ignored.clear();
 	for( int handle : ignored )
 	{
-		const auto it = m_simulation->bodies.find( handle );
-		if( it != m_simulation->bodies.end() )
-		{
-			found->ignored.push_back( it->second.id );
-		}
+		m_simulation->AppendBodies( handle, found->ignored );	// a ragdoll's id is every part of it
 	}
 	return true;
 }
@@ -1981,6 +2048,13 @@ bool Tr2PhysicsWorld::SetRagdollJoint(
 	{
 		return false;	// the root has no parent to be joined to
 	}
+	// Where the two are joined is on or near both: a joint far off either turns a little into a great throw
+	const Ragdoll::Part& joined = ragdoll->parts[part];
+	const JPH::RVec3 where = ToJoltPosition( anchor );
+	if( JPH::Vec3( where - joined.position ).Length() > MAX_HALF_EXTENT || JPH::Vec3( where - ragdoll->parts[joined.parent].position ).Length() > MAX_HALF_EXTENT )
+	{
+		return false;
+	}
 	const float swingNormal = swing.x;
 	const float swingPlane = swing.y;
 	const float twistMin = twist.x;
@@ -2069,8 +2143,9 @@ bool Tr2PhysicsWorld::BuildRagdoll( int id )
 		part.mMotionType = JPH::EMotionType::Kinematic;	// where it was given, still, until its mode says otherwise
 		part.mAllowDynamicOrKinematic = true;
 		part.mObjectLayer = MovingLayer( ragdoll->group );
-		// Swept, a limb fights the joint that holds it; the root alone is, and keeps the body the right side of a floor
-		part.mMotionQuality = i == 0 ? JPH::EMotionQuality::LinearCast : JPH::EMotionQuality::Discrete;
+		// Swept, as every moving body is: a foot falling 3 m meets a floor of bare triangles at 7 m/s, a third of its
+		// own length a step, and unswept went through it and hung there below the floor
+		part.mMotionQuality = JPH::EMotionQuality::LinearCast;
 		part.mFriction = FRICTION;
 		part.mAngularDamping = RAGDOLL_ANGULAR_DAMPING;
 		part.mMaxLinearVelocity = RAGDOLL_MAX_SPEED;
@@ -2163,17 +2238,39 @@ bool Tr2PhysicsWorld::SetRagdollMode( int id, int mode )
 		return true;
 	}
 	JPH::BodyInterface& bodyInterface = m_simulation->system.GetBodyInterface();
-	for( const JPH::BodyID& part : ragdoll->ragdoll->GetBodyIDs() )
+	if( mode == RAGDOLL_LIMP )
 	{
-		if( mode == RAGDOLL_LIMP )
+		// Its target is the pose on screen, a step ahead of where its keyed parts are: they are let go from there, at
+		// the speed that would have taken them there, so what pushes it next pushes the body as it is drawn
+		const float seconds = m_simulation->lastStepSeconds;
+		const bool onward = ragdoll->hasTarget && !ragdoll->teleport && m_simulation->TargetInReach( *ragdoll, seconds );
+		for( size_t i = 0; i < ragdoll->parts.size(); ++i )
 		{
-			bodyInterface.SetMotionType( part, JPH::EMotionType::Dynamic, JPH::EActivation::Activate );	// keeping the speed it had
+			const JPH::BodyID part = ragdoll->ragdoll->GetBodyID( static_cast<int>( i ) );
+			if( onward )
+			{
+				bodyInterface.MoveKinematic( part, ragdoll->targetPositions[i], ragdoll->targetRotations[i], seconds );
+				bodyInterface.SetPositionAndRotation( part, ragdoll->targetPositions[i], ragdoll->targetRotations[i], JPH::EActivation::DontActivate );
+			}
+			else if( ragdoll->hasTarget )
+			{
+				bodyInterface.SetPositionAndRotation( part, ragdoll->targetPositions[i], ragdoll->targetRotations[i], JPH::EActivation::DontActivate );
+				bodyInterface.SetLinearAndAngularVelocity( part, JPH::Vec3::sZero(), JPH::Vec3::sZero() );
+			}
+			bodyInterface.SetMotionType( part, JPH::EMotionType::Dynamic, JPH::EActivation::Activate );
 		}
-		else
+	}
+	else
+	{
+		for( const JPH::BodyID& part : ragdoll->ragdoll->GetBodyIDs() )
 		{
 			bodyInterface.SetMotionType( part, JPH::EMotionType::Kinematic, JPH::EActivation::Activate );
 			bodyInterface.SetLinearAndAngularVelocity( part, JPH::Vec3::sZero(), JPH::Vec3::sZero() );
 		}
+		// It stays where it lies until it is given a target, the last one being from before it fell; and it is put on
+		// the next at once, however near
+		ragdoll->hasTarget = false;
+		ragdoll->teleport = true;
 	}
 	ragdoll->ragdoll->ResetWarmStart();	// what the joints learnt holding the last mode's pose would kick this one
 	ragdoll->mode = mode;
@@ -2203,6 +2300,60 @@ bool Tr2PhysicsWorld::PlaceRagdoll( int id, const std::vector<Vector3>& position
 		bodyInterface.SetLinearAndAngularVelocity( part, JPH::Vec3::sZero(), JPH::Vec3::sZero() );
 	}
 	ragdoll->ragdoll->ResetWarmStart();
+	ragdoll->hasTarget = false;	// a target from before it was placed would take it back
+	ragdoll->teleport = true;
+	return true;
+}
+
+bool Tr2PhysicsWorld::SetRagdollTarget( int id, const std::vector<Vector3>& positions, const std::vector<Quaternion>& rotations )
+{
+	Ragdoll* ragdoll = FindBuiltRagdoll( id );
+	const size_t count = ragdoll ? ragdoll->parts.size() : 0;
+	if( !ragdoll || positions.size() != count || rotations.size() != count )
+	{
+		return false;
+	}
+	JPH::Quat turn;
+	for( size_t i = 0; i < count; ++i )
+	{
+		if( !AllFinite( positions[i] ) || !ToJoltRotation( rotations[i], turn ) )
+		{
+			return false;	// leaving the last target whole
+		}
+	}
+	ragdoll->targetPositions.resize( count );
+	ragdoll->targetRotations.resize( count );
+	for( size_t i = 0; i < count; ++i )
+	{
+		ragdoll->targetPositions[i] = ToJoltPosition( positions[i] );
+		ToJoltRotation( rotations[i], ragdoll->targetRotations[i] );
+	}
+	ragdoll->hasTarget = true;
+	return true;
+}
+
+bool Tr2PhysicsWorld::GetRagdollPose( int id, std::vector<Vector3>& positions, std::vector<Quaternion>& rotations, std::vector<char>& dynamic ) const
+{
+	const Ragdoll* ragdoll = FindBuiltRagdoll( id );
+	if( !ragdoll )
+	{
+		return false;
+	}
+	const size_t count = ragdoll->parts.size();
+	positions.resize( count );
+	rotations.resize( count );
+	dynamic.resize( count );
+	const JPH::BodyInterface& bodyInterface = m_simulation->system.GetBodyInterface();
+	for( size_t i = 0; i < count; ++i )
+	{
+		const JPH::BodyID part = ragdoll->ragdoll->GetBodyID( static_cast<int>( i ) );
+		JPH::RVec3 position;
+		JPH::Quat rotation;
+		bodyInterface.GetPositionAndRotation( part, position, rotation );
+		positions[i] = FromJoltPosition( position );
+		rotations[i] = Quaternion( rotation.GetX(), rotation.GetY(), rotation.GetZ(), rotation.GetW() );
+		dynamic[i] = bodyInterface.GetMotionType( part ) == JPH::EMotionType::Dynamic ? 1 : 0;
+	}
 	return true;
 }
 
@@ -2330,11 +2481,7 @@ std::pair<std::pair<int, float>, std::pair<Vector3, Vector3>> Tr2PhysicsWorld::T
 	ignoredBodies.reserve( ignored.size() );
 	for( int handle : ignored )
 	{
-		const auto it = m_simulation->bodies.find( handle );
-		if( it != m_simulation->bodies.end() )
-		{
-			ignoredBodies.push_back( it->second.id );
-		}
+		m_simulation->AppendBodies( handle, ignoredBodies );
 	}
 	const QueryBodies bodies( ignoredBodies, static_cast<JPH::uint32>( ignoredTags ) );
 	const QueryLayers layers( group );
@@ -2410,13 +2557,13 @@ std::pair<std::pair<int, float>, std::pair<Vector3, Vector3>> Tr2PhysicsWorld::T
 	}
 
 	std::vector<JPH::BodyID> ignoredBodies = { moved->id };
+	if( moved->ragdoll != 0 )
+	{
+		m_simulation->AppendBodies( moved->ragdoll, ignoredBodies );	// a part overlaps its neighbours as it is built
+	}
 	for( int handle : ignored )
 	{
-		const auto it = m_simulation->bodies.find( handle );
-		if( it != m_simulation->bodies.end() )
-		{
-			ignoredBodies.push_back( it->second.id );
-		}
+		m_simulation->AppendBodies( handle, ignoredBodies );
 	}
 
 	JPH::RefConst<JPH::Shape> shape;
@@ -2466,14 +2613,24 @@ bool Tr2PhysicsWorld::Step( float seconds )
 	{
 		return false;
 	}
+	for( auto& entry : m_simulation->ragdolls )
+	{
+		Ragdoll& ragdoll = *entry.second;
+		if( ragdoll.ragdoll && ragdoll.hasTarget && ragdoll.mode == RAGDOLL_KEYED )
+		{
+			m_simulation->MoveToTarget( ragdoll, seconds );
+		}
+	}
 	const int collisionSteps = std::clamp( static_cast<int>( std::ceil( seconds / MAX_STEP - 1e-4f ) ), 1, MAX_COLLISION_STEPS );
 	const JPH::EPhysicsUpdateError error =
 		m_simulation->system.Update( seconds, collisionSteps, &m_simulation->tempAllocator, &m_simulation->jobSystem );
+	// Out of room, Jolt has moved the bodies on all the same, leaving out what it had no room for
+	m_simulation->stepCount++;
+	m_simulation->lastStepSeconds = seconds;
 	if( error != JPH::EPhysicsUpdateError::None )
 	{
 		CCP_LOGWARN( "Tr2PhysicsWorld: the step ran out of room (error flags %u)", static_cast<unsigned>( error ) );
 		return false;
 	}
-	m_simulation->stepCount++;
 	return true;
 }

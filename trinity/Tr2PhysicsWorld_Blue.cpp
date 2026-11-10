@@ -98,13 +98,24 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			":param positions: (x, y, z) of each box's middle\n"
 			":param rotations: (x, y, z, w) of each box" )
 
-		MAP_METHOD_AND_WRAP( "RemoveBody", RemoveBody, "RemoveBody( id )\n\nRemoves a body, rope or character.  Returns False if there is none with that id" )
+		MAP_METHOD_AND_WRAP(
+			"RemoveBody",
+			RemoveBody,
+			"RemoveBody( id )\n\n"
+			"Removes a body, rope, character or ragdoll (built or not, with every part).  Returns False if there is none\n"
+			"with that id, or it is a ragdoll's part, which leaves with its ragdoll" )
 
-		MAP_METHOD_AND_WRAP( "HasBody", HasBody, "HasBody( id )\n\nWhether there is a body, rope or character with that id" )
+		MAP_METHOD_AND_WRAP(
+			"HasBody",
+			HasBody,
+			"HasBody( id )\n\nWhether there is a body, rope, character or ragdoll (built or not) with that id" )
 
-		MAP_METHOD_AND_WRAP( "Clear", Clear, "Removes every body, rope and character" )
+		MAP_METHOD_AND_WRAP( "Clear", Clear, "Removes every body, rope, character and ragdoll" )
 
-		MAP_METHOD_AND_WRAP( "ClearGroup", ClearGroup, "ClearGroup( group )\n\nRemoves every body and rope of a group" )
+		MAP_METHOD_AND_WRAP(
+			"ClearGroup",
+			ClearGroup,
+			"ClearGroup( group )\n\nRemoves every body, rope and ragdoll (built or not) of a group" )
 
 		MAP_METHOD_AND_WRAP(
 			"OptimizeBroadPhase",
@@ -116,7 +127,8 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			SetBodyGroup,
 			"SetBodyGroup( id, group )\n\n"
 			"Puts a body in a group, 0 to 3 (0 at first).  It meets only the bodies of its group; characters meet group 0's\n"
-			"static bodies and every group's moving ones.  Returns False if it is not there or the group is out of range" )
+			"static bodies and every group's moving ones.  A ragdoll's id puts every part of it there, and one not built\n"
+			"yet is built there.  Returns False if it is not there, is a ragdoll's part, or the group is out of range" )
 
 		MAP_METHOD_AND_WRAP(
 			"SetBodyTags",
@@ -171,7 +183,8 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			SetLinearVelocity,
 			"SetLinearVelocity( id, velocity )\n\n"
 			"Sets a kinematic or dynamic body moving at (x, y, z) m/s, up to 500, waking it.  Returns False for a static\n"
-			"body, one that is not there, or a velocity out of range" )
+			"body, one that is not there, or a velocity out of range.  A ragdoll's part takes one only while the simulation\n"
+			"moves it, and up to 30" )
 
 		MAP_METHOD_AND_WRAP(
 			"GetAngularVelocity",
@@ -183,7 +196,8 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			SetAngularVelocity,
 			"SetAngularVelocity( id, velocity )\n\n"
 			"Sets a kinematic or dynamic body turning at (x, y, z) rad/s, up to 40, waking it; an upright body ignores it.\n"
-			"Returns False for a static body, one that is not there, or a velocity out of range" )
+			"Returns False for a static body, one that is not there, or a velocity out of range.  A ragdoll's part takes\n"
+			"one only while the simulation moves it, and up to 30" )
 
 		MAP_METHOD_AND_WRAP(
 			"IsSleeping",
@@ -278,7 +292,7 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			"something at the start meets it only if the move goes further in: then the distance is minus how deep it is\n"
 			"and the normal the way out, so one resting on a floor still sees the wall ahead.\n"
 			":param radius: m; 0 for a ray\n"
-			":param ignored: ids of bodies to look past\n"
+			":param ignored: ids of bodies to look past; a ragdoll's id is every part of it\n"
 			":param ignoredTags: to look past bodies with any of these bits (SetBodyTags)\n"
 			":param group: a group, or -1 for what a character meets" )
 
@@ -287,7 +301,7 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			TraceBody,
 			"TraceBody( id, movement, ignored )\n\n"
 			"The first thing a body would meet moved by movement (x, y, z) from where it is, as a Trace; a body sliding along\n"
-			"what it rests on does not meet it" )
+			"what it rests on does not meet it, nor a ragdoll's part the rest of its ragdoll" )
 
 		MAP_METHOD_AND_WRAP(
 			"AddCharacter",
@@ -369,7 +383,8 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 		MAP_METHOD_AND_WRAP(
 			"SetCharacterIgnored",
 			SetCharacterIgnored,
-			"SetCharacterIgnored( id, ignored )\n\nThe ids of the bodies a character passes through, in place of those before" )
+			"SetCharacterIgnored( id, ignored )\n\n"
+			"The ids of the bodies a character passes through, in place of those before; a ragdoll's id is every part of it" )
 
 		MAP_METHOD_AND_WRAP(
 			"SetCharacterPassing",
@@ -446,14 +461,29 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			"SetRagdollMode",
 			SetRagdollMode,
 			"SetRagdollMode( id, mode )\n\n"
-			"Who moves a built ragdoll.  0 keyed: every part kinematic, staying where it is put.  2 limp: every part\n"
-			"dynamic, keeping the speed it had and falling as its joints let it.  Returns False for any other mode" )
+			"Who moves a built ragdoll.  0 keyed: every part kinematic, swept to its target (SetRagdollTarget) by each Step\n"
+			"and still without one; made keyed, it stays where it lies until it is given a new target, and is put on that\n"
+			"one at once.  2 limp: every part dynamic, falling as its joints let it; made limp, its parts are let go from\n"
+			"its target, at the speed that was taking them there.  Returns False for any other mode" )
 
 		MAP_METHOD_AND_WRAP(
 			"PlaceRagdoll",
 			PlaceRagdoll,
 			"PlaceRagdoll( id, positions, rotations )\n\n"
-			"Puts every part of a built ragdoll somewhere at once, at rest, meeting nothing on the way.\n"
+			"Puts every part of a built ragdoll somewhere at once, at rest, meeting nothing on the way, and forgets its\n"
+			"target: a keyed one stays there until it is given a new target, and is put on that one at once.\n"
+			":param positions: (x, y, z) of each part, by part index\n"
+			":param rotations: (x, y, z, w) of each" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRagdollTarget",
+			SetRagdollTarget,
+			"SetRagdollTarget( id, positions, rotations )\n\n"
+			"Where a built ragdoll's parts are to be after the next Step, which sweeps a keyed ragdoll's parts there, shoving\n"
+			"what they meet; each Step after sweeps them there again, so they stop.  The first target since it was built,\n"
+			"placed or made keyed is taken at once, and so is one any part would have to go faster than 20 m/s to reach.\n"
+			"A limp ragdoll keeps it for when it is keyed.  A Tr2AnimationRetargeter given the ragdoll sets this every pose.\n"
+			"Returns False, leaving the last target, for anything out of range.\n"
 			":param positions: (x, y, z) of each part, by part index\n"
 			":param rotations: (x, y, z, w) of each" )
 

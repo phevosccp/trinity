@@ -1926,6 +1926,8 @@ function(set_shared_trinity_properties target)
         # Jolt's library and headers without its usage requirements (see find_package(Jolt) at the top)
         target_link_libraries(${target} PRIVATE $<TARGET_FILE:Jolt::Jolt>)
         target_include_directories(${target} PRIVATE $<TARGET_PROPERTY:Jolt::Jolt,INTERFACE_INCLUDE_DIRECTORIES>)
+        # What uses Tr2PhysicsWorld from outside it (Tr2AnimationRetargeter's ragdoll stage) is compiled only with it
+        target_compile_definitions(${target} PRIVATE TRINITY_HAS_PHYSICS_WORLD)
     endif()
 
     target_sources(${target} PRIVATE ${_SOURCES})
