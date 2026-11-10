@@ -67,6 +67,17 @@ BLUE_DECLARE( Tr2PhysicsWorld );
  * Static boxes by the hundred are best made as one body (AddStaticBoxes), their edges hardly rounded, as a walker slides
  * past the seams between them where it would catch on the corners of separate boxes.
  *
+ * A ragdoll (AddRagdoll) is a body of parts, each joined to its parent by a joint that swings within a cone and twists
+ * within limits (Jolt's Ragdoll).  It is made part by part, parents first (AddRagdollPart, SetRagdollJoint), and comes
+ * into the world when built (BuildRagdoll), its parts where they were given, kinematic and still.  The world knows no
+ * skeleton: a part is a capsule or a box, and what bone it stands for is the caller's business.  Its mode says who moves
+ * it (SetRagdollMode): keyed, every part kinematic; limp, every part dynamic, falling as its joints let it.  A part
+ * never meets its parent, nor a part it overlaps as it is built.  Each part is also a body with an id of its own
+ * (GetRagdollParts), which the methods for bodies know, so a ray names the part it hits and an impulse pushes that part
+ * alone; only the ragdoll's own id removes it or changes its group, and a part is not moved one by one (SetMotion,
+ * SetTransform, MoveKinematic refuse it).  A character is not pushed by a kinematic part, takes a limp ragdoll for one
+ * thing as heavy as all of it, and does not shove one along as it does a crate.
+ *
  * If Trinity was built with other Jolt settings than its Jolt library (which Jolt would answer with std::abort), the
  * world is not available: it logs an error once, the Adds give 0 and Step does nothing.
  */
@@ -84,10 +95,24 @@ public:
 		MOTION_UPRIGHT = 3,
 	};
 
+	enum RagdollMode
+	{
+		RAGDOLL_KEYED = 0,
+		RAGDOLL_POWERED = 1,
+		RAGDOLL_LIMP = 2,
+	};
+
+	enum RagdollShape
+	{
+		RAGDOLL_CAPSULE = 0,
+		RAGDOLL_BOX = 1,
+	};
+
 	Tr2PhysicsWorld( IRoot* lockobj = nullptr );
 	~Tr2PhysicsWorld();
 
 	bool IsAvailable() const;
+	int GetStepCount() const;
 	Vector3 GetGravity() const;
 	void SetGravity( const Vector3& gravity );
 	int GetBodyCount() const;
@@ -151,6 +176,32 @@ public:
 	bool SetCharacterPassing( int id, int tags );
 	bool SetCharacterForce( int id, float mass, float strength );
 
+	int AddRagdoll();
+	// The part's index, -1 if refused.  size is (radius, halfHeight, 0) of a capsule along its own y, or a box's half
+	// extents
+	int AddRagdollPart( int id, int parent, int kind, const Vector3& size, const Vector3& position, const Quaternion& rotation, float mass );
+	// swing is (normal, plane, 0) half cones and twist (min, max, 0), radians: Blue wraps nine arguments at most
+	bool SetRagdollJoint(
+		int id,
+		int part,
+		const Vector3& anchor,
+		const Vector3& twistAxis,
+		const Vector3& planeAxis,
+		const Vector3& parentTwistAxis,
+		const Vector3& parentPlaneAxis,
+		const Vector3& swing,
+		const Vector3& twist );
+	bool BuildRagdoll( int id );
+	std::vector<int> GetRagdollParts( int id ) const;
+	// (the ragdoll's id, the part's index) of a part's body; (0, -1) for any other
+	std::pair<int, int> GetRagdollOf( int bodyId ) const;
+	int GetRagdollMode( int id ) const;
+	bool SetRagdollMode( int id, int mode );
+	bool PlaceRagdoll( int id, const std::vector<Vector3>& positions, const std::vector<Quaternion>& rotations );
+	std::vector<std::pair<Vector3, Quaternion>> GetRagdollTransforms( int id ) const;
+	bool SetRagdollFriction( int id, float torque );
+	bool IsRagdollActive( int id ) const;
+
 	// ((id, distance), (point, normal)) of the nearest body the segment meets; id 0 for none
 	std::pair<std::pair<int, float>, std::pair<Vector3, Vector3>> CastRay( const Vector3& from, const Vector3& to ) const;
 	std::pair<std::pair<int, float>, std::pair<Vector3, Vector3>> CastRayInGroup( const Vector3& from, const Vector3& to, int group ) const;
@@ -165,11 +216,15 @@ public:
 private:
 	struct Body;
 	struct Character;
+	struct Ragdoll;
 	struct Simulation;	// none if Jolt could not be set up
 
 	int AddBody( const JPH::ShapeSettings& shape, const Vector3& position, const Quaternion& rotation, int motion, float mass );
 	const Body* Find( int id ) const;	// none without a simulation, or for an id it has no body for; a rope is none
 	const Body* FindMoving( int id ) const;	// as Find, and none for a static body
+	const Body* FindLoose( int id ) const;	// as Find, and none for a ragdoll's part: a body the caller may move by itself
+	Ragdoll* FindRagdoll( int id ) const;	// none without a simulation, or for an id it has no ragdoll for
+	Ragdoll* FindBuiltRagdoll( int id ) const;	// as FindRagdoll, and none until it is built
 	const Body* FindRope( int id ) const;	// none without a simulation, or for an id it has no rope for
 	Character* FindCharacter( int id ) const;	// none without a simulation, or for an id it has no character for
 	std::pair<std::pair<int, float>, std::pair<Vector3, Vector3>> RayHit( const Vector3& from, const Vector3& to, int group ) const;

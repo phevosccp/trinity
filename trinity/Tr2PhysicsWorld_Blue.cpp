@@ -384,6 +384,98 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			"SetCharacterForce( id, mass, strength )\n\nA character's mass in kg and the N it pushes with, as AddCharacter's" )
 
 		MAP_METHOD_AND_WRAP(
+			"AddRagdoll",
+			AddRagdoll,
+			"AddRagdoll()\n\n"
+			"Starts a ragdoll and returns its id: a body of parts joined to each other, made part by part (AddRagdollPart,\n"
+			"SetRagdollJoint) and in the world once built (BuildRagdoll).  0 if the world is not available" )
+
+		MAP_METHOD_AND_WRAP(
+			"AddRagdollPart",
+			AddRagdollPart,
+			"AddRagdollPart( id, parent, kind, size, position, rotation, mass )\n\n"
+			"Adds a part to a ragdoll not built yet and returns its index, -1 for anything out of range.  At most 64.\n"
+			":param parent: the index of the part it hangs from, made before it; -1 for the first part, the root, and no other\n"
+			":param kind: 0 a capsule along its own y, 1 a box\n"
+			":param size: (radius, halfHeight, 0) of a capsule, (x, y, z) half extents of a box, as AddCapsule's and AddBox's\n"
+			":param position: (x, y, z) of its middle as the ragdoll is built, which is the pose its joints rest in\n"
+			":param rotation: (x, y, z, w)\n"
+			":param mass: kg, 0.001 to 1000000.  Building evens the parts' masses out, keeping their sum" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRagdollJoint",
+			SetRagdollJoint,
+			"SetRagdollJoint( id, part, anchor, twistAxis, planeAxis, parentTwistAxis, parentPlaneAxis, swing, twist )\n\n"
+			"The joint holding a part to its parent, in a ragdoll not built yet: the part swings its twist axis away from\n"
+			"its parent's within a cone and turns about it within limits.  Returns False for the root, or anything out of\n"
+			"range.  Every part but the root needs one before BuildRagdoll.\n"
+			":param anchor: (x, y, z) where the two are joined\n"
+			":param twistAxis: (x, y, z) the part's own axis, along its bone, as it is built\n"
+			":param planeAxis: (x, y, z) square to it\n"
+			":param parentTwistAxis: the axis in the parent that the part's twist axis rests along: the same as twistAxis\n"
+			"    for a joint at rest as it is built, another for one built bent\n"
+			":param parentPlaneAxis: square to it\n"
+			":param swing: (normal, plane, 0) radians, each 0 to pi: how far the part swings either way about the plane\n"
+			"    axis, and about the third axis (twist x plane).  Both 0 makes a hinge about the twist axis\n"
+			":param twist: (min, max, 0) radians about the twist axis, min -pi to 0 and max 0 to pi" )
+
+		MAP_METHOD_AND_WRAP(
+			"BuildRagdoll",
+			BuildRagdoll,
+			"BuildRagdoll( id )\n\n"
+			"Puts a ragdoll in the world, its parts where they were given, keyed (kinematic) and still.  A part never\n"
+			"meets its parent, nor any part within 2 cm of it now.  Returns False, making nothing, if it is built already,\n"
+			"has no parts, a part has no joint, or there is no room" )
+
+		MAP_METHOD_AND_WRAP(
+			"GetRagdollParts",
+			GetRagdollParts,
+			"GetRagdollParts( id )\n\n"
+			"The id of each part's own body, by part index; empty until built.  The methods for bodies know them: a ray\n"
+			"names the part it hits, AddImpulse pushes one.  RemoveBody, SetBodyGroup, SetMotion, SetTransform and\n"
+			"MoveKinematic refuse a part: use the ragdoll's id, its mode and PlaceRagdoll" )
+
+		MAP_METHOD_AND_WRAP(
+			"GetRagdollOf",
+			GetRagdollOf,
+			"GetRagdollOf( bodyId )\n\n(the ragdoll's id, the part's index) of a part's body; (0, -1) for any other" )
+
+		MAP_METHOD_AND_WRAP( "GetRagdollMode", GetRagdollMode, "GetRagdollMode( id )\n\n0 keyed, 2 limp; -1 if it is not built" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRagdollMode",
+			SetRagdollMode,
+			"SetRagdollMode( id, mode )\n\n"
+			"Who moves a built ragdoll.  0 keyed: every part kinematic, staying where it is put.  2 limp: every part\n"
+			"dynamic, keeping the speed it had and falling as its joints let it.  Returns False for any other mode" )
+
+		MAP_METHOD_AND_WRAP(
+			"PlaceRagdoll",
+			PlaceRagdoll,
+			"PlaceRagdoll( id, positions, rotations )\n\n"
+			"Puts every part of a built ragdoll somewhere at once, at rest, meeting nothing on the way.\n"
+			":param positions: (x, y, z) of each part, by part index\n"
+			":param rotations: (x, y, z, w) of each" )
+
+		MAP_METHOD_AND_WRAP(
+			"GetRagdollTransforms",
+			GetRagdollTransforms,
+			"GetRagdollTransforms( id )\n\n[((x, y, z), (x, y, z, w))] of each part, by part index; empty until built" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRagdollFriction",
+			SetRagdollFriction,
+			"SetRagdollFriction( id, torque )\n\n"
+			"N m each joint resists turning by, 0 to 10000 (3 until set): what settles a limp body" )
+
+		MAP_METHOD_AND_WRAP(
+			"IsRagdollActive",
+			IsRagdollActive,
+			"IsRagdollActive( id )\n\nFalse once every part of a built ragdoll has come to rest and sleeps" )
+
+		MAP_PROPERTY_READONLY( "stepCount", GetStepCount, "How many Steps have moved the simulation on" )
+
+		MAP_METHOD_AND_WRAP(
 			"Step",
 			Step,
 			"Step( seconds )\n\n"
