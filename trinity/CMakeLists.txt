@@ -51,8 +51,16 @@ if(NOT BUILD_FOR_PYTHON_2)
         Tr2PhysicsWorld_Blue.cpp
     )
     set(TRINITY_JOLT_DEFINITIONS JPH_FLOATING_POINT_EXCEPTIONS_ENABLED JPH_OBJECT_STREAM)
+    # And with /fp:precise.  Built with Trinity's /fp:fast by MSVC 14.52 (Visual Studio 18 Insiders), Jolt's inline
+    # Quat::Conjugated here came back unconjugated (it flips signs by xor with -0.0f), and a ragdoll's motors drove every
+    # joint to its limit (found 2026-11-10).  Jolt's own library is built /fp:fast too, by 14.44, and is right: so it is
+    # the two together, or the unoptimised Jolt code in that file.  Retest with a released VS 18 compiler, along with
+    # that file's #pragma optimize
+    # Jolt's Core.h asks clang for no -ffast-math either
+    set(TRINITY_JOLT_OPTIONS $<$<CXX_COMPILER_ID:MSVC>:/fp:precise> $<$<CXX_COMPILER_ID:Clang,AppleClang>:-fno-fast-math>)
     set_source_files_properties(Tr2PhysicsWorld.cpp PROPERTIES
         COMPILE_DEFINITIONS "${TRINITY_JOLT_DEFINITIONS}"
+        COMPILE_OPTIONS "${TRINITY_JOLT_OPTIONS}"
         SKIP_PRECOMPILE_HEADERS ON
     )
 endif()

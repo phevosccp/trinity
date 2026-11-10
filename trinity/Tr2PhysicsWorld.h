@@ -199,11 +199,18 @@ public:
 	bool SetRagdollMode( int id, int mode );
 	bool PlaceRagdoll( int id, const std::vector<Vector3>& positions, const std::vector<Quaternion>& rotations );
 	bool SetRagdollTarget( int id, const std::vector<Vector3>& positions, const std::vector<Quaternion>& rotations );
+	// For Tr2AnimationRetargeter, not exposed: up whenever a ragdoll's parts may have moved or changed hands (a step,
+	// a ragdoll built, placed, removed or its mode set), so a pose made from them is stale
+	int GetRagdollVersion() const;
 	// For Tr2AnimationRetargeter, not exposed: each part's place and turn, and whether the simulation moves it (1) or
 	// the caller does (0).  False, the vectors left as they were, if it is not built
 	bool GetRagdollPose( int id, std::vector<Vector3>& positions, std::vector<Quaternion>& rotations, std::vector<char>& dynamic ) const;
 	std::vector<std::pair<Vector3, Quaternion>> GetRagdollTransforms( int id ) const;
 	bool SetRagdollFriction( int id, float torque );
+	bool SetRagdollPartKeyed( int id, int part, bool keyed );
+	bool SetRagdollMotors( int id, float frequency, float damping, float maxTorque );
+	// ((part, the id of what struck it), (where, the momentum it had)) of each thing that struck it since last asked
+	std::vector<std::pair<std::pair<int, int>, std::pair<Vector3, Vector3>>> GetRagdollHits( int id );
 	bool IsRagdollActive( int id ) const;
 
 	// ((id, distance), (point, normal)) of the nearest body the segment meets; id 0 for none

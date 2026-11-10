@@ -427,7 +427,9 @@ private:
 	std::vector<Quaternion> m_ragdollBoneRotation;	// per target bone, the turn its part gives it, in the model's space
 	std::vector<char> m_ragdollTaken;	// per target bone, whether a part gave it one in the pose being made
 	std::vector<cmf::Transform> m_ragdollPose;	// per target bone, the ragdoll's whole pose in the model's space
-	int m_lastRagdollStep = -1;	// the world's step the last pose was made after
+	int m_lastRagdollVersion = -1;	// the world's ragdoll version the last pose was made at
+	bool m_lastHadRagdoll = false;	// whether the stage had a ragdoll to pose from then
+	bool m_ragdollWarned = false;	// a ragdoll that is not the one the bones were given for has been logged
 	std::vector<uint32_t> m_ikMoved;	// the bones the feet, look, hands and ragdoll turned in the pose being made
 	std::vector<Quaternion> m_turnForBone;	// per target bone, the rig's turns of it and the bones above it, in the model's space
 	std::vector<Quaternion> m_linkWorld;	// per link of the rig being retargeted, the world rotation its target bone takes

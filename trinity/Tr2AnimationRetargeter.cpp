@@ -562,7 +562,8 @@ bool Tr2AnimationRetargeter::SetRagdoll( Tr2PhysicsWorld* world, int id )
 	}
 	m_ragdollWorld = world;
 	m_ragdoll = id;
-	m_lastRagdollStep = -1;
+	m_lastRagdollVersion = -1;
+	m_ragdollWarned = false;
 	m_lastPoseCurrent = false;
 	return true;
 #else
@@ -1992,16 +1993,43 @@ void Tr2AnimationRetargeter::ApplyRagdoll( const cmf::Skeleton& skeleton, cmf::S
 		m_ragdollPositions[part.part] = m_ragdollFramePosition + placed;
 		m_ragdollRotations[part.part] = XMQuaternionNormalize( XMQuaternionMultiply( rotation, m_ragdollFrameRotation ) );
 	}
-	m_ragdollWorld->SetRagdollTarget( m_ragdoll, m_ragdollPositions, m_ragdollRotations );
+	if( !m_ragdollWorld->SetRagdollTarget( m_ragdoll, m_ragdollPositions, m_ragdollRotations ) )
+	{
+		if( !m_ragdollWarned )
+		{
+			CCP_LOGWARN( "Tr2AnimationRetargeter: ragdoll %d has another number of parts than the %u bones it was given; it stays on the clips", m_ragdoll, (unsigned)partCount );
+			m_ragdollWarned = true;
+		}
+		return;
+	}
 
 	const float weight = Clamp01( m_ragdollWeight );
 	if( weight <= 0.f )
 	{
 		return;
 	}
+	const Vector3 rootTargetPosition = m_ragdollPositions[0];
+	const Quaternion rootTargetRotation = m_ragdollRotations[0];
 	if( !m_ragdollWorld->GetRagdollPose( m_ragdoll, m_ragdollPositions, m_ragdollRotations, m_ragdollDynamic ) || m_ragdollPositions.size() != partCount )
 	{
 		return;	// the ragdoll in the world is not the one the bones were given for
+	}
+	if( !m_ragdollDynamic[0] )
+	{
+		// Powered: the parts the simulation moves hang from a root that is keyed, and so a step behind the pose being
+		// made.  They are taken as they hang from it, onto where the pose has the root now, or the body would trail
+		// its own legs by a frame
+		const Vector3 rootPosition = m_ragdollPositions[0];
+		const Quaternion onward = XMQuaternionMultiply( XMQuaternionConjugate( m_ragdollRotations[0] ), rootTargetRotation );
+		for( size_t part = 1; part < partCount; ++part )
+		{
+			if( m_ragdollDynamic[part] )
+			{
+				const Vector3 from = XMVector3Rotate( m_ragdollPositions[part] - rootPosition, onward );
+				m_ragdollPositions[part] = rootTargetPosition + from;
+				m_ragdollRotations[part] = XMQuaternionNormalize( XMQuaternionMultiply( m_ragdollRotations[part], onward ) );
+			}
+		}
 	}
 
 	// The turn each part the simulation moves gives its bone, in the model's space; a keyed part is where the clips
@@ -2199,7 +2227,8 @@ void Tr2AnimationRetargeter::ModifyPose( const cmf::Skeleton& skeleton, cmf::Ske
 	m_lastPose = pose;
 	m_lastPoseCurrent = true;
 #ifdef TRINITY_HAS_PHYSICS_WORLD
-	m_lastRagdollStep = m_ragdollWorld ? m_ragdollWorld->GetStepCount() : -1;
+	m_lastHadRagdoll = HasRagdoll();
+	m_lastRagdollVersion = m_ragdollWorld ? m_ragdollWorld->GetRagdollVersion() : -1;
 #endif
 }
 
@@ -2210,8 +2239,10 @@ bool Tr2AnimationRetargeter::IsLastPose( const cmf::Skeleton& skeleton, const cm
 		return false;
 	}
 #ifdef TRINITY_HAS_PHYSICS_WORLD
-	// A ragdoll's parts move with the world's steps, whatever the clips do
-	if( HasRagdoll() && m_ragdollWorld->GetStepCount() != m_lastRagdollStep )
+	// A ragdoll comes and goes, and its parts move with the world's steps, whatever the clips do.  Even at weight 0 the
+	// pose is made again after a step, as a ragdoll placed or keyed again waits for the target only a pose gives it
+	const bool hasRagdoll = HasRagdoll();
+	if( hasRagdoll != m_lastHadRagdoll || ( hasRagdoll && m_ragdollWorld->GetRagdollVersion() != m_lastRagdollVersion ) )
 	{
 		return false;
 	}

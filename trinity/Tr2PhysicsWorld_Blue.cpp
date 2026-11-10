@@ -455,16 +455,45 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			GetRagdollOf,
 			"GetRagdollOf( bodyId )\n\n(the ragdoll's id, the part's index) of a part's body; (0, -1) for any other" )
 
-		MAP_METHOD_AND_WRAP( "GetRagdollMode", GetRagdollMode, "GetRagdollMode( id )\n\n0 keyed, 2 limp; -1 if it is not built" )
+		MAP_METHOD_AND_WRAP( "GetRagdollMode", GetRagdollMode, "GetRagdollMode( id )\n\n0 keyed, 1 powered, 2 limp; -1 if it is not built" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRagdollPartKeyed",
+			SetRagdollPartKeyed,
+			"SetRagdollPartKeyed( id, part, keyed )\n\n"
+			"Whether a part stays kinematic on the target while the ragdoll is powered (none does until set): the pelvis\n"
+			"and legs of a body struck as it stands.  Returns False for a part whose parent is not keyed, for unkeying one\n"
+			"with a keyed part hanging from it, and while the ragdoll is powered" )
+
+		MAP_METHOD_AND_WRAP(
+			"SetRagdollMotors",
+			SetRagdollMotors,
+			"SetRagdollMotors( id, frequency, damping, maxTorque )\n\n"
+			"How a powered part holds its pose: a spring of frequency Hz, 0.1 to 60 (20 until set), damped by damping of\n"
+			"critical, 0 to 10 (2), turning its joint with at most maxTorque N m, 0 to 100000 (1000).  Softer, a blow\n"
+			"shows more and longer, and a body in motion trails its clips: the stiffness goes by the two parts a joint\n"
+			"holds, not by all that hangs from them.  Returns False for anything out of range" )
+
+		MAP_METHOD_AND_WRAP(
+			"GetRagdollHits",
+			GetRagdollHits,
+			"GetRagdollHits( id )\n\n"
+			"What struck its parts since last asked, at most 32: [((part, id), (point, momentum))], the part's index, the\n"
+			"id of the dynamic body that struck it, where, and the (x, y, z) kg m/s that body had.  Only a body closing on\n"
+			"the part at 0.5 m/s or more counts, and no part of the same ragdoll; a body at rest that a keyed part swings\n"
+			"into has no momentum of its own" )
 
 		MAP_METHOD_AND_WRAP(
 			"SetRagdollMode",
 			SetRagdollMode,
 			"SetRagdollMode( id, mode )\n\n"
 			"Who moves a built ragdoll.  0 keyed: every part kinematic, swept to its target (SetRagdollTarget) by each Step\n"
-			"and still without one; made keyed, it stays where it lies until it is given a new target, and is put on that\n"
-			"one at once.  2 limp: every part dynamic, falling as its joints let it; made limp, its parts are let go from\n"
-			"its target, at the speed that was taking them there.  Returns False for any other mode" )
+			"and still without one; made keyed from limp, it stays where it lies until it is given a new target, and is put\n"
+			"on that one at once.  1 powered: the parts keyed one by one (SetRagdollPartKeyed) stay kinematic on the target,\n"
+			"the rest are dynamic, each joint's motor turning it to the target's pose (SetRagdollMotors): a body that\n"
+			"gives where it is struck and comes back.  2 limp: every part dynamic, motors off, falling as its joints let it.\n"
+			"A part let go limp is let go from its target, at the speed that was taking it there; powered, from where it is.\n"
+			"Returns False for any other mode, and for powered from limp (key it first) or before it has a target" )
 
 		MAP_METHOD_AND_WRAP(
 			"PlaceRagdoll",
@@ -481,8 +510,9 @@ const Be::ClassInfo* Tr2PhysicsWorld::ExposeToBlue()
 			"SetRagdollTarget( id, positions, rotations )\n\n"
 			"Where a built ragdoll's parts are to be after the next Step, which sweeps a keyed ragdoll's parts there, shoving\n"
 			"what they meet; each Step after sweeps them there again, so they stop.  The first target since it was built,\n"
-			"placed or made keyed is taken at once, and so is one any part would have to go faster than 20 m/s to reach.\n"
-			"A limp ragdoll keeps it for when it is keyed.  A Tr2AnimationRetargeter given the ragdoll sets this every pose.\n"
+			"placed or made keyed from limp is taken at once, and so is one a part would have to go faster than 50 m/s or\n"
+			"turn faster than 40 rad/s to reach.  A powered ragdoll's keyed parts go to it the same way, and its motors aim\n"
+			"for it.  A Tr2AnimationRetargeter given the ragdoll sets this every pose.\n"
 			"Returns False, leaving the last target, for anything out of range.\n"
 			":param positions: (x, y, z) of each part, by part index\n"
 			":param rotations: (x, y, z, w) of each" )

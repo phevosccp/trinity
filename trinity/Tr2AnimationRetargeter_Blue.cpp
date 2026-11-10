@@ -324,8 +324,9 @@ const Be::ClassInfo* Tr2AnimationRetargeter::ExposeToBlue()
 			"SetRagdoll( world, id )\n\n"
 			"The ragdoll whose parts stand for this character's bones: a built ragdoll's id in a Tr2PhysicsWorld, which is\n"
 			"kept alive.  ( None, 0 ) lets it go.  Every pose made hands the world the pose as the ragdoll's target\n"
-			"(SetRagdollTarget), and takes the ragdoll's pose back by ragdollWeight.  Returns False for a world without an\n"
-			"id or an id without a world." )
+			"(SetRagdollTarget), and takes the ragdoll's pose back by ragdollWeight.  Like every stage, it runs only once a\n"
+			"rig is bound, which takes a clip, at any weight.  Returns False for a world without an id or an id without a\n"
+			"world." )
 
 		MAP_METHOD_AND_WRAP(
 			"AddRagdollBone",
